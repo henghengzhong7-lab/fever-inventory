@@ -7,7 +7,8 @@
 | 仓库 | https://github.com/henghengzhong7-lab/fever-inventory |
 | 分支 | `main` |
 | 访问地址 | **https://henghengzhong7-lab.github.io/fever-inventory/** |
-| Pages 来源 | `GitHub Actions`（由工作流自动开启，无需手工设置） |
+| Pages 来源 | `GitHub Actions`（已启用，`build_type=workflow`） |
+| HTTPS | 已强制跳转（`https_enforced`） |
 
 注意：末尾的 `/` 不能省略。仓库名不是 `henghengzhong7-lab.github.io`，所以这是「项目站点」，必须带 `/fever-inventory/` 路径。
 
@@ -49,14 +50,19 @@ git push -u origin main
 2. `npm run build:pages` 生成 `dist`。
 3. `npm run verify:pages` 逐字节校验 `v1` 与 `dist`。
 4. `npm test` 与 `npm --prefix v1 test` 跑测试。
-5. `actions/configure-pages`（`enablement: true`）自动开启 Pages。
+5. `actions/configure-pages` 读取 Pages 配置。
 6. `actions/upload-pages-artifact` + `actions/deploy-pages` 发布。
+
+> **不要**给 `configure-pages` 加 `enablement: true`。GitHub 规定「创建 Pages 站点」必须用非 `GITHUB_TOKEN` 的凭据，
+> 官方文档原文：`This option requires a token other than GITHUB_TOKEN to be provided`。
+> 加了它会直接报 `Create Pages site failed. Error: Resource not accessible by integration`，把整个构建卡在第 5 步。
+> 工作流只能部署到**已经存在**的 Pages 站点。
 
 ### 3. 打开 Pages
 
-**通常不需要手工操作**：工作流里的 `actions/configure-pages@v5` 带 `enablement: true`，第一次运行时会自动把 `Settings` → `Pages` 的 `Source` 设为 `GitHub Actions`。
+**只需手工做一次**：仓库的 Pages 站点必须先用「有 `repo` 权限的账号凭据」启用一次（网页界面或 API 均可），之后每次推送都由工作流自动部署。本仓库已完成这一步。
 
-如果要手工确认或修改，进入 GitHub 仓库的 `Settings` → `Pages`：
+用网页界面：进入 GitHub 仓库的 `Settings` → `Pages`：
 
 1. `Build and deployment` 的 `Source` 选择 `GitHub Actions`。
 2. 等待 `Deploy to GitHub Pages` 工作流完成。
@@ -71,6 +77,18 @@ https://henghengzhong7-lab.github.io/fever-inventory/
 ```text
 https://<你的账号>.github.io/
 ```
+
+也可以用 API 启用一次（`<TOKEN>` 为有 `repo` 权限的凭据，例如 `gh auth token` 的输出）：
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Accept: application/vnd.github+json" \
+  https://api.github.com/repos/henghengzhong7-lab/fever-inventory/pages \
+  -d '{"build_type":"workflow"}'
+```
+
+返回 201 且 `html_url` 为 `https://henghengzhong7-lab.github.io/fever-inventory/` 即成功。
 
 ### 4. 本地预览发布产物
 

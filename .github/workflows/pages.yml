@@ -19,12 +19,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
@@ -42,13 +42,16 @@ jobs:
       - name: Run v1 application tests
         run: npm --prefix v1 test
 
+      # 注意：这里不要加 enablement: true。
+      # GitHub 规定「创建 Pages 站点」必须使用非 GITHUB_TOKEN 的凭据
+      # （configure-pages 文档原文：This option requires a token other than GITHUB_TOKEN），
+      # 所以工作流只能部署到「已经存在」的 Pages 站点。
+      # 本仓库的站点已启用（build_type=workflow），如被关闭需重新启用一次。
       - name: Setup Pages
-        uses: actions/configure-pages@v5
-        with:
-          enablement: true
+        uses: actions/configure-pages@v6
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: dist
 
@@ -61,4 +64,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
