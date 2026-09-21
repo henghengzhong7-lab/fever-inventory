@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FEver战队物资管理系统</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="header">
+    <h1>FEver战队物资管理系统</h1>
+    <p>机械 · 电控 · 视觉 · 硬件</p>
+  </div>
+
+  <div class="container">
+    <!-- 首页：分类概览 -->
+    <div id="page-home">
+      <div class="toolbar">
+        <button class="btn btn-primary" onclick="openPurchaseRequestModal()">+ 新建采购申请</button>
+        <button class="btn btn-secondary" onclick="openScanModal()">📷 扫码出入库</button>
+      </div>
+      <div id="categories-grid" class="categories-grid"></div>
+      <div class="table-container" style="margin-top:20px">
+        <div class="table-header">
+          <h3>最近动态</h3>
+        </div>
+        <div id="recent-activity"></div>
+      </div>
+    </div>
+
+    <!-- 分类详情页 -->
+    <div id="page-category" style="display:none">
+      <button class="btn btn-secondary back-btn" onclick="showPage('home')">← 返回首页</button>
+      <div class="toolbar">
+        <button class="btn btn-primary" onclick="openAddItemModal()">+ 新增物品</button>
+        <button class="btn btn-secondary" onclick="openScanModal()">📷 扫码</button>
+        <input type="text" class="form-input search-box" id="item-search" placeholder="搜索物品名称/编号..." oninput="filterItems()">
+      </div>
+      <div id="category-info"></div>
+      <div class="table-container" style="margin-top:15px">
+        <table>
+          <thead>
+            <tr>
+              <th>编号</th>
+              <th>名称</th>
+              <th>规格</th>
+              <th>状态</th>
+              <th>存放位置</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="items-tbody"></tbody>
+        </table>
+        <div id="items-empty" class="empty-state" style="display:none">
+          <div class="empty-state-icon">📦</div>
+          <div class="empty-state-text">暂无物品</div>
+          <p>点击"新增物品"开始添加</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- 采购管理页 -->
+    <div id="page-purchases" style="display:none">
+      <button class="btn btn-secondary back-btn" onclick="showPage('home')">← 返回首页</button>
+      <div class="toolbar">
+        <button class="btn btn-primary" onclick="openPurchaseRequestModal()">+ 新建采购申请</button>
+      </div>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>申请编号</th>
+              <th>分类</th>
+              <th>物品名称</th>
+              <th>数量</th>
+              <th>预算</th>
+              <th>状态</th>
+              <th>申请时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="purchases-tbody"></tbody>
+        </table>
+        <div id="purchases-empty" class="empty-state" style="display:none">
+          <div class="empty-state-icon">🛒</div>
+          <div class="empty-state-text">暂无采购申请</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 发票管理页 -->
+    <div id="page-invoices" style="display:none">
+      <button class="btn btn-secondary back-btn" onclick="showPage('home')">← 返回首页</button>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>发票号</th>
+              <th>关联采购</th>
+              <th>金额</th>
+              <th>供应商</th>
+              <th>开票日期</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="invoices-tbody"></tbody>
+        </table>
+        <div id="invoices-empty" class="empty-state" style="display:none">
+          <div class="empty-state-icon">🧾</div>
+          <div class="empty-state-text">暂无发票记录</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 出入库记录页 -->
+    <div id="page-transactions" style="display:none">
+      <button class="btn btn-secondary back-btn" onclick="showPage('home')">← 返回首页</button>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>物品编号</th>
+              <th>物品名称</th>
+              <th>类型</th>
+              <th>操作人</th>
+              <th>备注</th>
+            </tr>
+          </thead>
+          <tbody id="transactions-tbody"></tbody>
+        </table>
+        <div id="transactions-empty" class="empty-state" style="display:none">
+          <div class="empty-state-icon">📋</div>
+          <div class="empty-state-text">暂无出入库记录</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 采购申请模态框 -->
+  <div class="modal" id="modal-purchase">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 id="purchase-modal-title">新建采购申请</h2>
+        <button class="modal-close" onclick="closeModal('modal-purchase')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">所属分类 *</label>
+          <select class="form-select" id="pr-category"></select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">物品名称 *</label>
+          <input type="text" class="form-input" id="pr-name" placeholder="如：步进电机NEMA17">
+        </div>
+        <div class="form-group">
+          <label class="form-label">规格型号</label>
+          <input type="text" class="form-input" id="pr-spec" placeholder="如：42BYGH 1.5A">
+        </div>
+        <div class="form-group">
+          <label class="form-label">数量 *</label>
+          <input type="number" class="form-input" id="pr-quantity" min="1" value="1">
+        </div>
+        <div class="form-group">
+          <label class="form-label">预算金额（元）</label>
+          <input type="number" class="form-input" id="pr-budget" min="0" step="0.01" placeholder="0.00">
+        </div>
+        <div class="form-group">
+          <label class="form-label">用途说明</label>
+          <textarea class="form-textarea" id="pr-purpose" placeholder="说明采购用途..."></textarea>
+        </div>
+        <div class="form-group">
+          <label class="form-label">申请人</label>
+          <input type="text" class="form-input" id="pr-applicant" placeholder="申请人姓名">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('modal-purchase')">取消</button>
+        <button class="btn btn-primary" onclick="submitPurchaseRequest()">提交申请</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 到货确认模态框 -->
+  <div class="modal" id="modal-arrival">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>确认到货并入库</h2>
+        <button class="modal-close" onclick="closeModal('modal-arrival')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="arrival-info"></div>
+        <div class="form-group">
+          <label class="form-label">实际到货数量 *</label>
+          <input type="number" class="form-input" id="arrival-quantity" min="1" value="1">
+        </div>
+        <div class="form-group">
+          <label class="form-label">存放位置</label>
+          <input type="text" class="form-input" id="arrival-location" placeholder="如：A区-3号柜">
+        </div>
+        <hr style="margin:20px 0;border:none;border-top:1px solid #e2e8f0">
+        <h3 style="margin-bottom:15px;font-size:16px">发票信息</h3>
+        <div class="form-group">
+          <label class="form-label">发票号码</label>
+          <input type="text" class="form-input" id="arrival-invoice-no" placeholder="发票号码">
+        </div>
+        <div class="form-group">
+          <label class="form-label">发票金额（元）</label>
+          <input type="number" class="form-input" id="arrival-invoice-amount" min="0" step="0.01" placeholder="0.00">
+        </div>
+        <div class="form-group">
+          <label class="form-label">供应商</label>
+          <input type="text" class="form-input" id="arrival-invoice-supplier" placeholder="供应商名称">
+        </div>
+        <div class="form-group">
+          <label class="form-label">开票日期</label>
+          <input type="date" class="form-input" id="arrival-invoice-date">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('modal-arrival')">取消</button>
+        <button class="btn btn-success" onclick="confirmArrival()">确认到货入库</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 新增物品模态框 -->
+  <div class="modal" id="modal-add-item">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>新增物品</h2>
+        <button class="modal-close" onclick="closeModal('modal-add-item')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">物品名称 *</label>
+          <input type="text" class="form-input" id="item-name" placeholder="如：步进电机NEMA17">
+        </div>
+        <div class="form-group">
+          <label class="form-label">规格型号</label>
+          <input type="text" class="form-input" id="item-spec" placeholder="如：42BYGH 1.5A">
+        </div>
+        <div class="form-group">
+          <label class="form-label">数量 *</label>
+          <input type="number" class="form-input" id="item-quantity" min="1" value="1">
+        </div>
+        <div class="form-group">
+          <label class="form-label">存放位置</label>
+          <input type="text" class="form-input" id="item-location" placeholder="如：A区-3号柜">
+        </div>
+        <div class="form-group">
+          <label class="form-label">备注</label>
+          <textarea class="form-textarea" id="item-remark" placeholder="备注信息..."></textarea>
+        </div>
+        <div id="extra-fields-container"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('modal-add-item')">取消</button>
+        <button class="btn btn-primary" onclick="submitAddItem()">确认添加</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 物品详情模态框 -->
+  <div class="modal" id="modal-item-detail">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>物品详情</h2>
+        <button class="modal-close" onclick="closeModal('modal-item-detail')">&times;</button>
+      </div>
+      <div class="modal-body" id="item-detail-body"></div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('modal-item-detail')">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 扫码模态框 -->
+  <div class="modal" id="modal-scan">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>扫码出入库</h2>
+        <button class="modal-close" onclick="closeScanModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="qr-reader" style="width:100%"></div>
+        <div class="form-group" style="margin-top:15px">
+          <label class="form-label">或手动输入物品编号</label>
+          <input type="text" class="form-input" id="manual-item-id" placeholder="输入物品编号">
+        </div>
+        <div id="scan-result" style="display:none;margin-top:15px">
+          <div id="scan-item-info"></div>
+          <div style="display:flex;gap:10px;margin-top:15px">
+            <button class="btn btn-success" onclick="doTransaction('in')">入库</button>
+            <button class="btn btn-danger" onclick="doTransaction('out')">出库</button>
+          </div>
+          <div class="form-group" style="margin-top:15px">
+            <label class="form-label">操作人</label>
+            <input type="text" class="form-input" id="txn-operator" placeholder="操作人姓名">
+          </div>
+          <div class="form-group">
+            <label class="form-label">备注</label>
+            <input type="text" class="form-input" id="txn-remark" placeholder="如：用于XX项目">
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 二维码展示模态框 -->
+  <div class="modal" id="modal-qrcode">
+    <div class="modal-content" style="max-width:400px">
+      <div class="modal-header">
+        <h2>物品二维码</h2>
+        <button class="modal-close" onclick="closeModal('modal-qrcode')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="qr-code-container">
+          <div id="qrcode-display"></div>
+          <div class="qr-code-info" id="qrcode-info"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('modal-qrcode')">关闭</button>
+        <button class="btn btn-primary" onclick="printQRCode()">打印二维码</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/lib/qrcode.min.js"></script>
+  <script src="js/db.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

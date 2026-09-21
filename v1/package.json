@@ -1,0 +1,13 @@
+{
+  "name": "fever-inventory-v1",
+  "version": "1.0.0",
+  "private": true,
+  "description": "FEver 战队物资管理 —— 第一版（本地离线运行的电脑网页版）",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/test.js",
+    "test:e2e": "node test/e2e/run.js",
+    "test:persist": "node test/e2e/run-persist.js",
+    "test:all": "node test/run-all.js"
+  }
+}

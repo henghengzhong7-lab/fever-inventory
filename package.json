@@ -1,0 +1,13 @@
+{
+  "name": "fever-inventory",
+  "version": "1.0.0",
+  "description": "FEver战队物资管理系统",
+  "scripts": {
+    "build:pages": "node scripts/build-pages.js",
+    "verify:pages": "node scripts/verify-pages.js",
+    "test": "node test/test.js"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.5"
+  }
+}
