@@ -1,5 +1,16 @@
 # GitHub Pages 上线与飞书接入
 
+## 〇、线上地址（当前状态）
+
+| 项目 | 值 |
+| --- | --- |
+| 仓库 | https://github.com/henghengzhong7-lab/fever-inventory |
+| 分支 | `main` |
+| 访问地址 | **https://henghengzhong7-lab.github.io/fever-inventory/** |
+| Pages 来源 | `GitHub Actions`（由工作流自动开启，无需手工设置） |
+
+注意：末尾的 `/` 不能省略。仓库名不是 `henghengzhong7-lab.github.io`，所以这是「项目站点」，必须带 `/fever-inventory/` 路径。
+
 ## 一、当前版本的边界
 
 这版应用是纯静态前端，数据使用浏览器 `IndexedDB` 保存。部署到 GitHub Pages 后：
@@ -15,7 +26,7 @@
 
 ### 1. 创建仓库
 
-在 GitHub 新建一个仓库，例如 `fever-inventory`。如果使用 GitHub Free，仓库建议设为公开。
+在 GitHub 新建一个仓库，例如 `fever-inventory`。如果使用 GitHub Free，仓库建议设为公开。本仓库已建好：`henghengzhong7-lab/fever-inventory`（公开）。
 
 不要把 `v1/_m0/`、浏览器缓存、备份文件或包含真实物资数据的文件提交到仓库。
 
@@ -28,22 +39,31 @@ git init
 git add .
 git commit -m "prepare GitHub Pages deployment"
 git branch -M main
-git remote add origin https://github.com/<你的账号>/fever-inventory.git
+git remote add origin https://github.com/henghengzhong7-lab/fever-inventory.git
 git push -u origin main
 ```
 
-把 `<你的账号>` 和仓库名替换成实际值。推送后，`.github/workflows/pages.yml` 会自动构建并发布 `dist`。
+推送后，`.github/workflows/pages.yml` 会自动构建并发布 `dist`。工作流按顺序执行：
+
+1. `npm ci` 安装依赖（**必需**：测试依赖 `fake-indexeddb`，不装会在测试步骤报 `Cannot find module 'fake-indexeddb/auto'`）。
+2. `npm run build:pages` 生成 `dist`。
+3. `npm run verify:pages` 逐字节校验 `v1` 与 `dist`。
+4. `npm test` 与 `npm --prefix v1 test` 跑测试。
+5. `actions/configure-pages`（`enablement: true`）自动开启 Pages。
+6. `actions/upload-pages-artifact` + `actions/deploy-pages` 发布。
 
 ### 3. 打开 Pages
 
-进入 GitHub 仓库的 `Settings` → `Pages`：
+**通常不需要手工操作**：工作流里的 `actions/configure-pages@v5` 带 `enablement: true`，第一次运行时会自动把 `Settings` → `Pages` 的 `Source` 设为 `GitHub Actions`。
+
+如果要手工确认或修改，进入 GitHub 仓库的 `Settings` → `Pages`：
 
 1. `Build and deployment` 的 `Source` 选择 `GitHub Actions`。
 2. 等待 `Deploy to GitHub Pages` 工作流完成。
-3. 项目地址通常是：
+3. 项目地址是：
 
 ```text
-https://<你的账号>.github.io/fever-inventory/
+https://henghengzhong7-lab.github.io/fever-inventory/
 ```
 
 如果仓库名是 `<你的账号>.github.io`，地址则是：
@@ -65,10 +85,11 @@ node v1/server.js --no-open
 
 在飞书开放平台创建“网页应用”或企业内部使用的网页应用：
 
-1. 将 GitHub Pages 地址填入应用的“首页地址/应用主页”一类配置。
-2. 如果平台要求配置可信域名，填主机名，不要填路径。例如填写 `<你的账号>.github.io`，而不是完整 URL。
+1. 将 GitHub Pages 地址填入应用的“首页地址/应用主页”一类配置：
+   `https://henghengzhong7-lab.github.io/fever-inventory/`。
+2. 如果平台要求配置可信域名，填主机名，不要填路径：`henghengzhong7-lab.github.io`，而不是完整 URL。
 3. 如果平台要求重定向地址，填写完整 HTTPS 地址，并使用最终会访问的路径：
-   `https://<你的账号>.github.io/fever-inventory/`。
+   `https://henghengzhong7-lab.github.io/fever-inventory/`。
 4. 发布或启用应用后，将应用分配给测试人员或企业内部成员。
 5. 在飞书客户端中打开应用，验证首次初始化、扫码、导出备份和刷新后的数据持久化。
 
