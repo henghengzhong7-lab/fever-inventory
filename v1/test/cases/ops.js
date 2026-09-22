@@ -73,13 +73,13 @@ module.exports.register = function (H, DB, Rules, Ops) {
     // 界面代码统一写 Ops.xxx().catch(...)，所以校验失败必须能以 Promise 拒绝的形式被接到，
     // 否则界面上不会出现任何提示，控制台还会留下未捕获错误。
     const returnsPromise = Ops.arrive({
-      requestId: 1, quantity: 1, invoiceNo: '', amount: 10, supplier: 'x', operator: '张三'
+      requestId: 1, quantity: 1, invoiceNo: '', amount: 10, operator: ''
     });
     assert(returnsPromise && typeof returnsPromise.then === 'function', '应返回 Promise');
     let caught = null;
     await returnsPromise.catch((err) => { caught = err; });
     assert(caught, '应能以 catch 接到错误');
-    assertEqual(caught.userMessage, '发票号码不能为空', '应给出可直接展示给使用者的提示');
+    assertEqual(caught.userMessage, '操作人不能为空', '应给出可直接展示给使用者的提示');
 
     let caught2 = null;
     await Ops.inbound({ categoryId: 'mechanical', quantity: 1, operator: '张三' })
@@ -139,6 +139,59 @@ module.exports.register = function (H, DB, Rules, Ops) {
     const ledger = await Ops.lendLedger();
     assertEqual(ledger.length, 1);
     assertEqual(ledger[0].qty, 3, '还剩 3 件未还');
+  });
+
+  test('同一件东西借给两个人，台账要两笔都在（不是只剩后借的那个）', async () => {
+    await fresh();
+    await addItem({ code: 'MC-0001' });
+    await Ops.lend({ code: 'MC-0001', qty: 3, operator: '张三', borrower: '先借的人', dueDate: '2026-09-25' });
+    await Ops.lend({ code: 'MC-0001', qty: 2, operator: '张三', borrower: '后借的人', dueDate: '2026-09-28' });
+
+    const item = await DB.get('items', 'MC-0001');
+    const ledger = await Ops.lendLedger(new Date('2026-09-21T10:00:00+08:00'));
+    assertEqual(ledger.length, 2, '两个人各借一次，台账要有两笔，实际 ' + ledger.length + ' 笔');
+    assertEqual(ledger.map((r) => r.borrower).sort().join(','), '先借的人,后借的人',
+      '两个借用人都要在台账里，实际：' + ledger.map((r) => r.borrower).join('、'));
+    assertEqual(ledger.reduce((s, r) => s + r.qty, 0), item.lentQty,
+      '台账里未还的件数之和要等于物品上的借出件数');
+  });
+
+  test('归还先把最早那笔冲掉，剩下后借的那笔仍在台账上', async () => {
+    await fresh();
+    await addItem({ code: 'MC-0001' });
+    await Ops.lend({ code: 'MC-0001', qty: 3, operator: '张三', borrower: '早借的', dueDate: '2026-09-25' });
+    await Ops.lend({ code: 'MC-0001', qty: 2, operator: '张三', borrower: '晚借的', dueDate: '2026-09-28' });
+    await Ops.giveBack({ code: 'MC-0001', qty: 3, operator: '李四' });
+
+    const ledger = await Ops.lendLedger();
+    assertEqual(ledger.length, 1, '还清一笔后应只剩一笔，实际 ' + ledger.length + ' 笔');
+    assertEqual(ledger[0].borrower, '晚借的', '先借的先还，剩下的应是后借的那笔');
+    assertEqual(ledger[0].qty, 2);
+  });
+
+  test('一次归还跨过好几笔借出（把几个人的一起收回来）', async () => {
+    await fresh();
+    await addItem({ code: 'MC-0001' });
+    await Ops.lend({ code: 'MC-0001', qty: 2, operator: '张三', borrower: '甲', dueDate: '2026-09-25' });
+    await Ops.lend({ code: 'MC-0001', qty: 2, operator: '张三', borrower: '乙', dueDate: '2026-09-26' });
+    await Ops.lend({ code: 'MC-0001', qty: 2, operator: '张三', borrower: '丙', dueDate: '2026-09-27' });
+    await Ops.giveBack({ code: 'MC-0001', qty: 5, operator: '李四' });
+
+    const ledger = await Ops.lendLedger();
+    assertEqual(ledger.length, 1, '还掉 5 件后应只剩 1 件未还，实际 ' + ledger.length + ' 笔');
+    assertEqual(ledger[0].borrower, '丙', '先借先还，剩下的应是最后那笔的一部分');
+    assertEqual(ledger[0].qty, 1);
+  });
+
+  test('到期日相同也按借出先后排，页面顺序不会随机跳', async () => {
+    await fresh();
+    await addItem({ code: 'MC-0001' });
+    await Ops.lend({ code: 'MC-0001', qty: 1, operator: '张三', borrower: '第一个', dueDate: '2026-09-30' });
+    await Ops.lend({ code: 'MC-0001', qty: 1, operator: '张三', borrower: '第二个', dueDate: '2026-09-30' });
+
+    const ledger = await Ops.lendLedger(new Date('2026-09-21T10:00:00+08:00'));
+    assertEqual(ledger.map((r) => r.borrower).join(','), '第一个,第二个',
+      '同一天到期的应按借出先后排，实际：' + ledger.map((r) => r.borrower).join('、'));
   });
 
   test('超期借用会标出超期天数并排在前面', async () => {
@@ -300,16 +353,16 @@ module.exports.register = function (H, DB, Rules, Ops) {
     assertEqual((await DB.getAll('invoices')).length, 1, '不应产生第二张发票');
   });
 
-  test('到货缺少发票号或供应商会被拒绝且不生成物品', async () => {
+  test('到货时缺金额或缺操作人仍会被拒绝且不生成物品（发票号/供应商已选填）', async () => {
     await fresh();
     const reqId = await DB.add('purchaseRequests', {
       categoryId: 'hardware', name: '扎带', quantity: 10, budget: 5,
       purpose: 'x', applicant: '张三', status: 'ordered',
       createdAt: DB.nowIso(), updatedAt: DB.nowIso()
     });
-    await assertRejects(() => Ops.arrive({ requestId: reqId, quantity: 10, amount: 5, supplier: '五金店', operator: '李四' }), '缺发票号应拒绝');
-    await assertRejects(() => Ops.arrive({ requestId: reqId, quantity: 10, invoiceNo: 'FP-1', amount: 5, operator: '李四' }), '缺供应商应拒绝');
-    await assertRejects(() => Ops.arrive({ requestId: reqId, quantity: 10, invoiceNo: 'FP-1', amount: 0, supplier: '五金店', operator: '李四' }), '金额为 0 应拒绝');
+    // 第十三轮：发票号与供应商不再必填 —— 但金额、操作人这类老校验一个都不能松
+    await assertRejects(() => Ops.arrive({ requestId: reqId, quantity: 10, amount: 0, operator: '李四' }), '金额为 0 应拒绝');
+    await assertRejects(() => Ops.arrive({ requestId: reqId, quantity: 10, amount: 5, operator: '' }), '缺操作人应拒绝');
     assertEqual((await DB.getAll('items')).length, 0, '被拒后不应生成物品');
     assertEqual((await DB.getAll('invoices')).length, 0, '被拒后不应生成发票');
     assertEqual((await DB.get('purchaseRequests', reqId)).status, 'ordered', '申请状态不应改变');

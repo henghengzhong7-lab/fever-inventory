@@ -14,6 +14,7 @@
   var Ops = global.FEVER.Ops;
   var Rules = global.FEVER.Rules;
   var App = global.FEVER.App;
+  var DB = global.FEVER.DB;
 
   function text(sel) {
     var node = document.querySelector(sel);
@@ -21,12 +22,19 @@
   }
   function body() { return text('#view-root'); }
 
-  /** 切到某个大类页，等到该类的专属工作区渲染出来 */
-  function gotoCategory(id, marker) {
-    App.goto('category', { id: id });
-    return E2E.waitUntil('大类页 ' + id + ' 就绪', function () {
-      return document.querySelector('#view-root').getAttribute('data-page') === 'category' &&
-        body().indexOf(marker) !== -1;
+  /**
+   * 切到某个大类页，等到该类的专属工作区渲染出来。
+   *
+   * 必须走 E2E.goto（它等的是"框架换过 #view-root 节点"）。
+   * 只等 data-page / 页面文字是不行的：**已经停在这一页时**，这两个条件
+   * 在重画之前就已经成立了，测试会骑在旧页面上点按钮 —— 表现为
+   * "点不到自己刚建的那几条数据"，而单独复刻同一场景却又是对的。
+   * 实测踩过一次：批量打印/批量删除三条用例全红，真因在这个等待条件。
+   */
+  async function gotoCategory(id, marker) {
+    await E2E.goto('category', { id: id });
+    await E2E.waitUntil('大类页 ' + id + ' 的专属工作区就绪', function () {
+      return body().indexOf(marker) !== -1;
     });
   }
 
@@ -317,6 +325,203 @@
           body().indexOf('出入库履历') !== -1;
       });
       E2E.ok(body().indexOf(code) !== -1, '详情页应显示该编码 ' + code);
+    });
+
+    /* ================= 批量：勾选 → 批量打印 / 批量删除 ================= */
+
+    /** 清单里所有勾选框上的编码，按显示顺序 */
+    function rowCodes() {
+      return Array.prototype.slice.call(document.querySelectorAll('#cat-table .row-pick'))
+        .map(function (n) { return n.getAttribute('data-pick'); });
+    }
+    function boxOf(code) {
+      return document.querySelector('#cat-table .row-pick[data-pick="' + code + '"]');
+    }
+    /** 勾上某几件（真点一下，靠浏览器的 change 事件触发页面逻辑） */
+    async function pickCodes(codes) {
+      for (var i = 0; i < codes.length; i += 1) {
+        var box = boxOf(codes[i]);
+        if (!box) throw new Error('找不到 ' + codes[i] + ' 的勾选框');
+        E2E.click(box);
+      }
+      await E2E.waitUntil('已选 ' + codes.length + ' 件', function () {
+        return document.querySelector('#cat-selected').textContent.indexOf('已选 ' + codes.length + ' 件') !== -1;
+      });
+    }
+    function selectedText() {
+      var node = document.querySelector('#cat-selected');
+      return node ? node.textContent.replace(/\s+/g, ' ').trim() : '';
+    }
+
+    await E2E.record('物品清单每条都能勾，没勾选时批量按钮是禁用的', async function () {
+      await gotoCategory('mechanical', '标准件库存');
+      E2E.ok(rowCodes().length === 3, '机械有 3 件物品就该有 3 个勾选框，实际 ' + rowCodes().length);
+      E2E.ok(selectedText().indexOf('已选 0 件') !== -1, '一上来应当是「已选 0 件」，实际 ' + selectedText());
+      ['#cat-batch-print', '#cat-batch-del', '#cat-batch-clear'].forEach(function (sel) {
+        var btn = document.querySelector(sel);
+        E2E.ok(btn && btn.disabled === true, sel + ' 在没勾选时必须是禁用的（免得有人先点按钮再找东西勾）');
+      });
+    });
+
+    await E2E.record('勾选后按钮亮起、已选数字跟着变，清空选择能一键取消', async function () {
+      await gotoCategory('mechanical', '标准件库存');
+      var codes = rowCodes();
+      await pickCodes([codes[0], codes[1]]);
+      E2E.ok(document.querySelector('#cat-batch-print').disabled === false, '勾了之后批量打印应当能点');
+      E2E.ok(document.querySelector('#cat-batch-del').disabled === false, '勾了之后批量删除应当能点');
+      E2E.ok(boxOf(codes[0]).checked === true, '勾选框本身要显示成勾上的');
+
+      E2E.click(document.querySelector('#cat-batch-clear'));
+      await E2E.waitUntil('清空后回到 0 件', function () {
+        return selectedText().indexOf('已选 0 件') !== -1;
+      });
+      E2E.ok(boxOf(codes[0]).checked === false, '清空选择后行上的勾也要跟着取消');
+      E2E.ok(document.querySelector('#cat-batch-print').disabled === true, '清空后按钮应重新变灰');
+    });
+
+    await E2E.record('全选只选「当前筛选结果」，换筛选条件不丢已勾的', async function () {
+      await gotoCategory('mechanical', '标准件库存');
+      E2E.setInput(document.querySelector('[name="f-keyword"]'), 'M4');
+      await E2E.waitUntil('筛选后只剩一件', function () { return rowCodes().length === 1; });
+
+      E2E.click(document.querySelector('#cat-check-all'));
+      await E2E.waitUntil('已选 1 件', function () { return selectedText().indexOf('已选 1 件') !== -1; });
+      E2E.ok(rowCodes().length === 1, '筛选结果就是 1 件');
+
+      E2E.setInput(document.querySelector('[name="f-keyword"]'), '');
+      await E2E.waitUntil('筛选恢复成 3 件', function () { return rowCodes().length === 3; });
+      E2E.ok(selectedText().indexOf('已选 1 件') !== -1,
+        '换个筛选条件不该把已经勾好的默默清掉，实际 ' + selectedText());
+    });
+
+    await E2E.record('批量打印：按勾选顺序出标签，并把选中集合记进地址栏', async function () {
+      await gotoCategory('mechanical', '标准件库存');
+      var codes = rowCodes();
+      // 故意倒着勾：先勾第二件，再勾第一件 —— 标签就该按这个顺序排
+      await pickCodes([codes[1], codes[0]]);
+
+      E2E.click(document.querySelector('#cat-batch-print'));
+      await E2E.waitUntil('标签页只剩勾的那两张', function () {
+        return document.querySelectorAll('.label-card').length === 2;
+      });
+      var printed = Array.prototype.slice.call(document.querySelectorAll('.label-card .label-code'))
+        .map(function (n) { return n.textContent.trim(); });
+      E2E.ok(printed.join(',') === codes[1] + ',' + codes[0],
+        '标签要按勾选顺序出（撕下来挨着贴才对得上），期望 ' + codes[1] + ',' + codes[0] + '，实际 ' + printed.join(','));
+      E2E.ok(location.hash.indexOf('#labels/batch/') === 0,
+        '选中集合要记进地址栏，否则一刷新就退回「打印全部」，实际 ' + location.hash);
+      E2E.ok(text('.page-sub').indexOf('2 张') !== -1, '页头要写清共几张，实际 ' + text('.page-sub'));
+    });
+
+    await E2E.record('批量打印的链接可以直接打开（刷新 / 转发同事都回到同一批）', async function () {
+      // 直接改地址栏，等于模拟"刷新"或"别人打开这个链接"
+      location.hash = '#labels/batch/MC-0003,MC-0002';
+      await E2E.waitUntil('按链接打开后标签按链接里的顺序出', function () {
+        var printed = Array.prototype.slice.call(document.querySelectorAll('.label-card .label-code'))
+          .map(function (n) { return n.textContent.trim(); });
+        return printed.join(',') === 'MC-0003,MC-0002';
+      });
+
+      // 老的单张形式不能被新写法弄坏
+      location.hash = '#labels/VS-0001';
+      await E2E.waitUntil('单个编码的老链接照旧只出一张', function () {
+        var cards = document.querySelectorAll('.label-card');
+        return cards.length === 1 && cards[0].textContent.indexOf('VS-0001') !== -1;
+      });
+    });
+
+    await E2E.record('大类页的「批量打印标签」只出本大类的标签', async function () {
+      // 这个按钮以前把 data-cat 丢了：不管点哪个大类，打出来的都是**全部物品**的标签。
+      // 一整叠标签纸打错是很难发现的浪费，所以专门盯一条。
+      await gotoCategory('mechanical', '标准件库存');
+      E2E.click(document.querySelector('[data-act="print-labels"]'));
+      await E2E.waitUntil('标签页只出机械的标签', function () {
+        var cards = document.querySelectorAll('.label-card');
+        if (!cards.length) return false;
+        return Array.prototype.slice.call(cards).every(function (c) {
+          return c.querySelector('.label-code').textContent.trim().indexOf('MC-') === 0;
+        });
+      });
+      E2E.ok(text('.page-sub').indexOf('机械') !== -1,
+        '页头要写清这是「机械」下的标签，实际 ' + text('.page-sub'));
+      E2E.ok(document.querySelectorAll('.label-card').length === 3,
+        '机械有 3 件就该出 3 张，实际 ' + document.querySelectorAll('.label-card').length);
+    });
+
+    await E2E.record('批量删除：确认框写清删哪几件，点取消一件都不删', async function () {
+      await gotoCategory('mechanical', '标准件库存');
+      var target = rowCodes().slice(-1)[0];
+      await pickCodes([target]);
+
+      E2E.click(document.querySelector('#cat-batch-del'));
+      var modal = await E2E.waitUntil('确认框出现', function () { return E2E.topModal(); });
+      E2E.ok(modal.textContent.indexOf(target) !== -1,
+        '确认框第一行要写清删的是哪一条，实际：' + modal.textContent.replace(/\s+/g, ' ').slice(0, 160));
+      E2E.ok(modal.textContent.indexOf('删除记录') !== -1, '要说明会记入删除记录');
+
+      E2E.click(modal.querySelector('[data-act="no"]'));
+      await E2E.wait(150);
+      E2E.closeAllModals();
+      E2E.ok(!!(await DB.get('items', target)), '点了取消就不该删掉任何东西');
+      E2E.ok((await Rules.getDeleteLog()).length === 0, '取消不该留下删除记录');
+    });
+
+    await E2E.record('批量删除：借出中的被跳过并写明原因，其他照删', async function () {
+      var lentCode = (await Ops.inbound({
+        categoryId: 'mechanical', name: '借出去的件', quantity: 1, identityMode: 'single', operator: '测试'
+      })).codes[0];
+      var freeCode = (await Ops.inbound({
+        categoryId: 'mechanical', name: '在库的件', quantity: 1, identityMode: 'single', operator: '测试'
+      })).codes[0];
+      await Ops.lend({ code: lentCode, qty: 1, operator: '测试', borrower: '王五', dueDate: '2030-01-01' });
+
+      await gotoCategory('mechanical', '标准件库存');
+      await pickCodes([lentCode, freeCode]);
+
+      E2E.click(document.querySelector('#cat-batch-del'));
+      var modal = await E2E.waitUntil('确认框出现', function () { return E2E.topModal(); });
+      E2E.ok(modal.textContent.indexOf('跳过') !== -1,
+        '要提前说清哪几件会被跳过，而不是让人以为全都删了：' + modal.textContent.replace(/\s+/g, ' ').slice(0, 200));
+      E2E.ok(modal.textContent.indexOf('借在外面') !== -1, '跳过原因要说人话（借在外面）');
+
+      E2E.click(modal.querySelector('[data-act="yes"]'));
+      await E2E.waitUntilAsync('在库的那件被删掉', function () {
+        return DB.get('items', freeCode).then(function (r) { return !r; });
+      });
+      E2E.ok(!!(await DB.get('items', lentCode)), '借出去的那件必须还在，否则实物就没人认领了');
+    });
+
+    await E2E.record('批量删除：确认后清单里消失，且每一件都单独记了一笔账', async function () {
+      await gotoCategory('mechanical', '标准件库存');
+      var codes = rowCodes();
+      E2E.ok(codes.length >= 2, '这一轮至少要剩两件可删的，实际 ' + codes.length);
+      var two = codes.slice(0, 2);
+      var before = (await Rules.getDeleteLog()).length;
+
+      await pickCodes(two);
+      E2E.click(document.querySelector('#cat-batch-del'));
+      var modal = await E2E.waitUntil('确认框出现', function () { return E2E.topModal(); });
+      E2E.click(modal.querySelector('[data-act="yes"]'));
+
+      await E2E.waitUntilAsync('两件都被删掉', function () {
+        return Promise.all(two.map(function (c) { return DB.get('items', c); }))
+          .then(function (rows) { return rows.every(function (r) { return !r; }); });
+      });
+
+      var log = await Rules.getDeleteLog();
+      E2E.ok(log.length === before + two.length,
+        '删两件就要多两笔账（逐条留痕），实际多了 ' + (log.length - before));
+      two.forEach(function (c) {
+        var hit = log.filter(function (r) { return r.store === 'items' && r.key === c; });
+        E2E.ok(hit.length === 1, c + ' 应当有且只有一笔删除记录');
+        E2E.ok(!!hit[0].snapshot, c + ' 的删除记录要带快照，否则以后没法还原');
+      });
+
+      // 界面上也不该再出现它们
+      await gotoCategory('mechanical', '标准件库存');
+      two.forEach(function (c) {
+        E2E.ok(body().indexOf(c) === -1, '清单里不该再出现 ' + c);
+      });
     });
 
     E2E.finish();

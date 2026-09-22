@@ -145,7 +145,13 @@
       }).join('');
       return '<tr' + (trCls ? ' class="' + trCls + '"' : '') + '>' + tds + '</tr>';
     }).join('');
-    return '<table class="grid"><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table>';
+    // cols-N 给测试和排查用（一眼看出这张表有几列）；
+    // --table-min 是手机端用的"最小宽度"：列多的表别把每列挤到只剩两个字，
+    // 让它横向滑动。按列数算，而不是在 CSS 里枚举 cols-6/7/8/9 ——
+    // 枚举法加一列就漏（流水表就是 10 列，一开始就漏了）。
+    var minWidth = Math.max(320, columns.length * 100) + 'px';
+    return '<table class="grid cols-' + columns.length + '" style="--table-min:' + minWidth + '">' +
+      '<thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table>';
   }
 
   /** 状态徽标 */
@@ -226,6 +232,25 @@
     }, 200);
   }
 
+  /**
+   * 下载二进制内容（发票 PDF、批量打包的 zip 都用它）。
+   * data 是字节数组 / Uint8Array / 可迭代数字。
+   */
+  function downloadBytes(filename, data, mime) {
+    var bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    var blob = new Blob([bytes], { type: mime || 'application/octet-stream' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 200);
+  }
+
   /** 选择本地文件并读出文本内容 */
   function pickTextFile(accept) {
     return new Promise(function (resolve) {
@@ -264,6 +289,7 @@
     field: field,
     alertBar: alertBar,
     downloadText: downloadText,
+    downloadBytes: downloadBytes,
     pickTextFile: pickTextFile
   };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>端到端测试 · 飞书共享版写入体验</title>
+  <link rel="stylesheet" href="/v1/css/style.css">
+  <script>
+    /* 尽量早地捕获错误：脚本加载阶段的错误也要能看见 */
+    window.__EARLY_ERRORS__ = [];
+    window.addEventListener('error', function (e) {
+      window.__EARLY_ERRORS__.push('加载期错误：' + (e.message || e.type) + ' @ ' + (e.filename || '') + ':' + (e.lineno || ''));
+    }, true);
+  </script>
+</head>
+<body>
+  <img id="e2e-gate" src="/e2e-hang" alt="" style="display:none">
+  <main id="view-root" class="view-root"></main>
+  <div id="modal-root"></div>
+  <div id="toast-root" class="toast-root"></div>
+  <pre id="e2e-out" style="display:none"></pre>
+
+  <script src="/v1/js/lib/qrcode.min.js"></script>
+  <!-- 假后端必须排在数据层之前：它要把 window.fetch 换掉 -->
+  <script src="/feishu/test/fake-backend.js"></script>
+  <script src="/feishu/js/db-remote.js"></script>
+  <script src="/v1/js/rules.js"></script>
+  <script src="/v1/js/ops.js"></script>
+  <script src="/v1/js/ui.js"></script>
+  <script src="/feishu/test/async-cases.js"></script>
+</body>
+</html>

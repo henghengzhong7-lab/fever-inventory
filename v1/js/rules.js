@@ -33,6 +33,278 @@
     canceled: '已取消'
   };
 
+  /* ---------- 采购申请的审批 ---------- */
+
+  /** 审批状态。三个值都是终态中的一种，流转只由管理员触发 */
+  var APPROVALS = ['pending', 'approved', 'rejected'];
+
+  var APPROVAL_NAMES = {
+    pending: '待审批',
+    approved: '已同意',
+    rejected: '已驳回'
+  };
+
+  /**
+   * 取一条采购申请的审批状态。
+   *
+   * **老数据没有 approval 字段，一律视为「已同意」。**
+   * 这不是偷懒，是"加功能不能弄坏原有流程"的关键一条：这些申请是在引入审批
+   * 之前建的（甚至已经在途了），如果按"没批过"处理，上线当天所有在途的单子
+   * 会一起卡住，还得逐条补点一次同意。引入新规则时不追溯改判历史数据。
+   *
+   * 认不出来的值（比如手改过表、或者以后加了新状态）一律按「待审批」处理 ——
+   * 宁可多让管理员点一次，也不放过一条没批的申请。
+   */
+  function approvalOf(req) {
+    if (!req) return 'approved';
+    var raw = req.approval === undefined || req.approval === null ? '' : String(req.approval).trim();
+    if (!raw) return 'approved';
+    return APPROVALS.indexOf(raw) === -1 ? 'pending' : raw;
+  }
+
+  /** 这条申请能不能往下走（下单、到货）。只有「已同意」能走 */
+  function isApproved(req) { return approvalOf(req) === 'approved'; }
+
+  /** 是不是还等着管理员处理 */
+  function isPendingApproval(req) { return approvalOf(req) === 'pending'; }
+
+  /* ---------- 删除记录 ---------- */
+
+  /**
+   * 删除记录存在 settings 里的一张追加表里。
+   *
+   * 为什么删东西还要留账：这套系统的硬要求是「可追溯」——出入库流水被刻意做成
+   * 只追加、不可改写，就是为了这条。后加的删除功能不能把这个前提拆掉，
+   * 所以每删一条都记一笔：谁、什么时候、删了什么、以及**被删对象的完整快照**。
+   * 有了快照，删掉的流水也还能查回来（人工恢复的最小信息量）。
+   */
+  var DELETE_LOG_KEY = 'deleteLog';
+
+  /** 只留最近这些条，免得 settings 那一列无限长下去 */
+  var DELETE_LOG_MAX = 300;
+
+  /** 当前操作人。离线版没有登录，如实写成「本机操作」而不是编一个名字 */
+  function currentActor() {
+    var user = null;
+    if (DB && typeof DB.currentUser === 'function') {
+      try { user = DB.currentUser(); } catch (err) { user = null; }
+    }
+    return (user && (user.name || user.openId)) || '本机操作';
+  }
+
+  /** 各种删除对象在记录里显示成什么 */
+  var DELETE_LABELS = {
+    items: '物品',
+    purchaseRequests: '采购申请',
+    invoices: '发票',
+    transactions: '出入库流水'
+  };
+
+  /**
+   * 写 settings 的"安全版"：失败只告警，不抛出。
+   *
+   * 只给「删除记录」这一类**附带动作**用。它们记的是已经发生的事实 ——
+   * 东西确实删掉了 —— 记日志失败不该反过来让调用方以为主操作也失败了，
+   * 那会让人以为数据还在，反而更危险。主操作成没成功由它自己的 Promise 说话。
+   */
+  function setSettingSafe(key, value) {
+    return Promise.resolve().then(function () {
+      return DB.setSetting(key, value);
+    }).then(function () { return true; }, function (err) {
+      if (global.console && console.warn) {
+        console.warn('[设置写入] ' + key + ' 保存失败：' + (err && err.message ? err.message : err));
+      }
+      return false;
+    });
+  }
+
+  /**
+   * 把一次删除动作做成「删除记录」里的一行。
+   *
+   * 单独抽出来是因为**批量删除**也要用同一套格式：它在一个事务里一次写 N 条，
+   * 不能去调 logDeletion（那个函数自己会另起一次写）。抽成纯函数之后，
+   * 单条删和批量删留下的记录长得一模一样，不会一个地方改了另一边没跟上。
+   */
+  function buildDeletionEntry(entry) {
+    var e = entry || {};
+    return {
+      at: e.at || DB.nowIso(),
+      by: e.by || currentActor(),
+      store: e.store,
+      key: String(e.key),
+      label: (DELETE_LABELS[e.store] || e.store) + ' ' + (e.label || e.key),
+      reason: e.reason || '',
+      snapshot: e.snapshot === undefined ? null : e.snapshot
+    };
+  }
+
+  /**
+   * 把新记录并进已有记录，并裁到上限（只留最近的）。
+   *
+   * 裁的是**最老的**那批：删除记录是审计线索，越近的越可能被用到。
+   */
+  function mergeDeleteLog(current, fresh) {
+    var rows = (Array.isArray(current) ? current : []).concat(fresh || []);
+    if (rows.length > DELETE_LOG_MAX) rows = rows.slice(rows.length - DELETE_LOG_MAX);
+    return rows;
+  }
+
+  /**
+   * 记一条删除。**必须在事务之外调用** —— 它自己会写 settings。
+   * 写日志失败不能把已经完成的删除回滚（删除本身是成功的），所以这里吞掉错误、
+   * 只在控制台留痕：宁可少一条审计记录，也不能让界面显示"删除失败"而其实删掉了。
+   *
+   * 批量删除走的是另一条路（见 actions.js 的 deleteItemsBatch）：它把删除和留痕
+   * 放进**同一个事务**，一次写完 —— 联网版因此只发一次写请求，N 件不会变成 N 次往返。
+   */
+  function logDeletion(entry) {
+    var row = buildDeletionEntry(entry);
+    return getDeleteLog().then(function (list) {
+      return setSettingSafe(DELETE_LOG_KEY, mergeDeleteLog(list, [row]));
+    }).then(function (ok) {
+      // ok 为 false 表示日志没写进去（setSettingSafe 已经告警过）。
+      // 这时如实返回 null 而不是假装记上了 —— 调用方不用因此改口说"删除失败"
+      // （东西确实删掉了），但界面可以据此提示"这次没记上"，别让人以为有据可查。
+      return ok ? row : null;
+    }, function (err) {
+      if (global.console && console.warn) {
+        console.warn('[删除记录] 读取失败，删除本身已经完成：' + (err && err.message ? err.message : err));
+      }
+      return null;
+    });
+  }
+
+  function getDeleteLog() {
+    return DB.getSetting(DELETE_LOG_KEY, []).then(function (value) {
+      return Array.isArray(value) ? value : [];
+    });
+  }
+
+  function clearDeleteLog() { return setSettingSafe(DELETE_LOG_KEY, []); }
+
+  /**
+   * 这件物品能不能删。能删返回 null，不能删返回原因（人话）。
+   *
+   * 拦两种情形：**还有实物在别人手上或待修**。这时候删掉物品身份，
+   * 那些东西就没人认领了 —— 数量对不上，而且再也没法从系统里找到是谁借的。
+   * 只躺在库里的（含已领用/已用完）可以删：它们已经不影响追踪了。
+   */
+  function blockItemDeletion(item) {
+    if (!item) return '找不到这件物品';
+    if (num(item.lentQty) > 0) {
+      return '还有 ' + num(item.lentQty) + ' 件借在外面没还。等它们还回来再删，否则这几件东西就没人认领了。';
+    }
+    if (num(item.repairQty) > 0) {
+      return '还有 ' + num(item.repairQty) + ' 件在待修。先把它们处理掉再删。';
+    }
+    return null;
+  }
+
+  /* ================= 批量操作 ================= */
+
+  /**
+   * 把一堆物品分成「能删的」和「被拦住的」。
+   *
+   * 批量删除**不能做成"有一件不能删就整批失败"**：那样使用者只能一件件试，
+   * 反而更容易在反复重选中删错。要明确告诉他哪几件跳过了、为什么 ——
+   * 所以这里返回的是分区结果，不是一个 yes/no。
+   */
+  function partitionDeletable(items) {
+    var deletable = [];
+    var blocked = [];
+    (items || []).forEach(function (item) {
+      if (!item) return;
+      var reason = blockItemDeletion(item);
+      if (reason) blocked.push({ item: item, reason: reason });
+      else deletable.push(item);
+    });
+    return { deletable: deletable, blocked: blocked };
+  }
+
+  /**
+   * 按给定的编码顺序把物品挑出来。
+   *
+   * **顺序要紧**：批量打印时标签按勾选顺序排下来，人撕下来贴的时候才连得上；
+   * 所以这里不做排序、也不丢顺序，只按 codes 走一遍。
+   * 找不到的编码直接跳过（可能刚被别人删了），不补空位。
+   */
+  function pickByCodes(items, codes) {
+    var byCode = {};
+    (items || []).forEach(function (item) {
+      if (item && item.code) byCode[String(item.code)] = item;
+    });
+    return (codes || []).map(function (code) {
+      return byCode[String(code)];
+    }).filter(function (item) { return !!item; });
+  }
+
+  /**
+   * 编码列表 ↔ 地址栏片段。
+   *
+   * 批量打印是把"选中了哪几件"记在地址栏里的（`#labels/batch/MC-0001,VS-0002`）——
+   * 这样刷新、后退、把链接发给别人，都能回到同一批标签；存在内存里就会在刷新后
+   * 悄悄退回"打印全部"，那是会浪费一整叠标签纸的错误。
+   *
+   * 每个编码单独编码，所以编码里就算有逗号也不会把列表切错。
+   */
+  function encodeCodeList(codes) {
+    return (codes || []).map(function (code) { return encodeURIComponent(String(code)); }).join(',');
+  }
+
+  function decodeCodeList(text) {
+    return String(text === undefined || text === null ? '' : text)
+      .split(',')
+      .filter(function (part) { return part !== ''; })
+      .map(function (part) { return decodeURIComponent(part); });
+  }
+
+  /**
+   * 兵种选项。
+   *
+   * 采购申请必须选一个，兵种预算板块就按它来归类、汇总。
+   * 顺序是有意的：常用的排前面，「其他」永远放最后一个 ——
+   * 它是兜底选项，不该被误选；界面上也把它画成最后一个。
+   *
+   * 注意：这串值会**原样写进采购申请**并成为预算的归类键，
+   * 所以以后要改名（比如「前哨战」改成「前哨站」）必须同时提供
+   * 旧值的迁移映射，否则已经存在的申请会掉到预算之外 ——
+   * 见 troopOf() 里的兼容处理。
+   */
+  var TROOPS = ['重装', '步兵', '哨兵', '飞镖', '无人机', '雷达', '前哨战', '能量机关', '其他'];
+
+  /** 兜底兵种：认不出来的兵种一律归到这里，保证预算汇总不会漏账 */
+  var TROOP_FALLBACK = '其他';
+
+  /**
+   * 把任意值规范成一个合法兵种。
+   * 空值 → ''（表示未指定）；不认识的值 → 「其他」。
+   */
+  function normalizeTroop(value) {
+    var raw = value === undefined || value === null ? '' : String(value).trim();
+    if (!raw) return '';
+    return TROOPS.indexOf(raw) === -1 ? TROOP_FALLBACK : raw;
+  }
+
+  /**
+   * 取一条采购申请（或物品）的兵种。
+   * 老数据没有 troop 字段，返回 '' 表示「未指定」，由调用方决定怎么显示；
+   * 认不出来的值（比如用过后来删掉的兵种名）统一归到「其他」。
+   */
+  function troopOf(record) {
+    return record ? normalizeTroop(record.troop) : '';
+  }
+
+  /**
+   * 一张发票在界面上显示的名字。
+   * 发票号码改为选填后（第十三轮），没填号的发票不能显示成空白按钮 ——
+   * 回退到 PDF 文件名，再不行用登记序号。所有显示发票入口的地方都用这一个函数，
+   * 别各写各的回退（漏一处，界面上就多一个点不开的空按钮）。
+   */
+  function invoiceLabel(inv) {
+    if (!inv) return '';
+    return inv.invoiceNo || inv.fileName || ('发票 #' + inv.id);
+  }
+
   /**
    * 四个大类的配置。extraFields 是大类专属字段，
    * reminders 是该大类的提醒默认值（天数），都可以在界面上改。
@@ -416,6 +688,30 @@
     TXN_TYPES: TXN_TYPES,
     STATUS_NAMES: STATUS_NAMES,
     INVOICE_STATUS_NAMES: INVOICE_STATUS_NAMES,
+    TROOPS: TROOPS,
+    TROOP_FALLBACK: TROOP_FALLBACK,
+    normalizeTroop: normalizeTroop,
+    troopOf: troopOf,
+    invoiceLabel: invoiceLabel,
+    APPROVALS: APPROVALS,
+    APPROVAL_NAMES: APPROVAL_NAMES,
+    approvalOf: approvalOf,
+    isApproved: isApproved,
+    isPendingApproval: isPendingApproval,
+    DELETE_LOG_KEY: DELETE_LOG_KEY,
+    DELETE_LOG_MAX: DELETE_LOG_MAX,
+    DELETE_LABELS: DELETE_LABELS,
+    currentActor: currentActor,
+    buildDeletionEntry: buildDeletionEntry,
+    mergeDeleteLog: mergeDeleteLog,
+    logDeletion: logDeletion,
+    getDeleteLog: getDeleteLog,
+    clearDeleteLog: clearDeleteLog,
+    blockItemDeletion: blockItemDeletion,
+    partitionDeletable: partitionDeletable,
+    pickByCodes: pickByCodes,
+    encodeCodeList: encodeCodeList,
+    decodeCodeList: decodeCodeList,
     CATEGORY_DEFS: CATEGORY_DEFS,
     initCategories: initCategories,
     prefixOf: prefixOf,

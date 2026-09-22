@@ -1,5 +1,18 @@
 node_modules/
 dist/
+dist-feishu/
 .DS_Store
 Thumbs.db
 v1/_m0/
+
+# 飞书共享版：都是本机/线上的私密配置，不要提交
+feishu.config.json
+server/config.json
+server/public/
+
+# 运行时文件：登录名单与队员上传的发票 PDF，绝不进库
+server/known-users.json
+server/uploads/
+
+# WorkBuddy 会话数据
+.workbuddy/

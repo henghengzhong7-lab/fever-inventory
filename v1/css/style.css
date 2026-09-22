@@ -142,6 +142,22 @@ table.grid tbody tr.row-low-stock { background: var(--warn-soft); }
 table.grid tbody tr.row-low-stock:hover { background: #ffeccf; }
 table.grid td.num, table.grid th.num { text-align: right; }
 
+/* ---------- 批量操作条（物品清单上方） ---------- */
+.batch-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 12px; border-bottom: 1px solid var(--line); background: #fbfcff;
+}
+.batch-all {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 13px; color: var(--ink-soft); cursor: pointer; user-select: none;
+}
+.batch-all input { width: 15px; height: 15px; cursor: pointer; }
+.batch-info { font-size: 13px; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+.batch-bar .btn[disabled] { opacity: .45; cursor: not-allowed; }
+/* 勾选列窄一些，别把编码列挤走 */
+table.grid td.pick, table.grid th.pick { width: 34px; text-align: center; padding-left: 12px; padding-right: 2px; }
+table.grid td.pick input { width: 15px; height: 15px; cursor: pointer; }
+
 /* ---------- 大类专属工作区 ---------- */
 .pos-index { display: flex; flex-direction: column; gap: 10px; }
 .pos-group { border-left: 3px solid var(--brand-soft); padding-left: 10px; }
@@ -259,6 +275,34 @@ table.grid td.num, table.grid th.num { text-align: right; }
 .qr-meta { text-align: center; color: var(--ink-soft); font-size: 13px; }
 .qr-payload { font-family: Consolas, monospace; color: var(--ink-faint); font-size: 12px; }
 
+/* ---------- 扫码取景（第二版手机端） ---------- */
+.scan-overlay {
+  position: fixed; inset: 0; z-index: 90;
+  background: #10141d; display: flex;
+  align-items: center; justify-content: center;
+}
+.scan-stage {
+  position: relative; width: 100%; height: 100%;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 18px; padding: 20px;
+}
+.scan-video {
+  width: 100%; max-width: 520px; max-height: 62vh;
+  background: #000; border-radius: 12px; object-fit: cover;
+}
+/* 取景框靠一圈超大 box-shadow 把框外压暗，省掉再叠一层遮罩元素 */
+.scan-frame {
+  position: absolute; top: 50%; left: 50%;
+  width: 210px; height: 210px; margin: -105px 0 0 -105px;
+  border: 2px solid #fff; border-radius: 14px;
+  box-shadow: 0 0 0 200vmax rgba(10, 13, 20, .55);
+  pointer-events: none;
+}
+.scan-hint { color: #dfe5f2; font-size: 14px; text-align: center; line-height: 1.6; }
+.scan-cancel { min-width: 130px; justify-content: center; }
+/* 拍照识别：没有实时画面，按钮就是主操作，给足点击面积 */
+.scan-pick { min-width: 190px; justify-content: center; }
+
 /* ---------- 标签打印页 ---------- */
 .label-sheet { display: flex; flex-wrap: wrap; gap: 10px; }
 .label-card {
@@ -272,6 +316,139 @@ table.grid td.num, table.grid th.num { text-align: right; }
 .label-meta .label-name { font-weight: 700; word-break: break-all; }
 .label-meta .label-line { color: var(--ink-soft); word-break: break-all; }
 
+/* ---------- 物品详情：左二维码 / 右字段（原来写在行内，第二版要能按屏宽改方向） ---------- */
+.detail-row { display: flex; gap: 24px; flex-wrap: wrap; }
+.detail-qr { flex: 0 0 auto; }
+.detail-fields { flex: 1 1 420px; min-width: 320px; }
+
+/* ---------- 一行内的输入 + 按钮（出入库登记页的编码输入框） ---------- */
+.inline-row { display: flex; gap: 8px; }
+.inline-row .input { max-width: 320px; }
+
+/* ---------- 扫码查物（第二版手机端） ----------
+   这一页的结果卡片把「状态」和「存放位置」放在最上面、字号最大：
+   扫完一秒钟内要能回答的就是这两个问题，其他字段都是补充。 */
+.scan-start-row { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.scan-start { flex: 1 1 auto; justify-content: center; }
+.scan-photo { flex: 1 1 auto; justify-content: center; }
+/* 飞书扫码的准备情况：手机上排查"扫不了"时，这一行是要念回来给人听的 */
+.scan-diag { word-break: break-all; }
+
+.scan-result { display: flex; flex-direction: column; gap: 14px; }
+.scan-head { display: flex; flex-direction: column; gap: 4px; }
+.scan-name { font-size: 20px; font-weight: 700; line-height: 1.3; word-break: break-all; }
+.scan-meta { color: var(--ink-soft); font-size: 13px; }
+
+.scan-status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.scan-loc {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 12px 14px; border-radius: var(--radius);
+  background: var(--brand-soft); border-left: 4px solid var(--brand);
+}
+.scan-loc-label { font-size: 12px; font-weight: 700; color: var(--brand); letter-spacing: .5px; }
+.scan-loc-value { font-size: 19px; font-weight: 700; color: var(--ink); word-break: break-all; }
+.scan-loc-empty { color: var(--ink-faint); font-weight: 600; font-size: 15px; }
+
+.scan-lent {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 6px;
+  background: var(--warn-soft);
+}
+.scan-lent-title { font-size: 13px; font-weight: 700; color: var(--warn); }
+.scan-lent-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  font-size: 13px; padding-top: 6px; border-top: 1px dashed #e6d4b3;
+}
+.scan-lent-row:first-of-type { padding-top: 0; border-top: 0; }
+.scan-lent-row .who { font-weight: 700; }
+.scan-lent-row.overdue .who, .scan-lent-row.overdue > span { color: var(--danger); }
+
+.scan-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.scan-raw { margin-top: 8px; font-size: 13px; color: var(--ink-soft); word-break: break-all; }
+.scan-raw code { font-family: Consolas, monospace; }
+
+/* ---------- 手机端（第二版） ----------
+   断点 720px。这一段里的规则在桌面宽屏下一条都不匹配，
+   所以电脑端的排版与交互完全不受影响 —— 这是"不许碰坏电脑端"的落地点。 */
+@media (max-width: 720px) {
+  /* 顶栏分两行：品牌一行，导航一行并横向滑动。
+     刻意做成"能滑"而不是"折叠进汉堡菜单"：九个入口全都摸得到，不藏任何功能。 */
+  .topbar {
+    height: auto; padding: 8px 12px; gap: 8px;
+    flex-wrap: wrap; align-items: center;
+  }
+  .brand-text { font-size: 14px; }
+  .main-nav {
+    flex-wrap: nowrap; width: 100%; gap: 2px;
+    overflow-x: auto; -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;          /* 手机上一根横条很碍眼，滑动手感本身就说明可滑 */
+  }
+  .main-nav::-webkit-scrollbar { display: none; }
+  .nav-item { flex: 0 0 auto; padding: 9px 12px; }   /* 手指点得中 */
+
+  .crumb { padding: 8px 12px 0; font-size: 12px; }
+  .view-root { padding: 12px 12px 40px; max-width: none; }
+
+  .page-head { align-items: flex-start; gap: 10px; margin-bottom: 10px; }
+  .page-title { font-size: 18px; }
+  .page-actions { width: 100%; }
+  .page-actions .btn { flex: 1 1 auto; justify-content: center; }
+
+  .cat-grid { grid-template-columns: 1fr; gap: 10px; }
+  .page-sub { word-break: break-all; }
+
+  /* 宽表格：不把列挤成一团，改成在面板内横向滑动。
+     每张表的最小宽度由 UI.table 按列数算好、写在 --table-min 上。
+     不在这里枚举 cols-6/7/8…：表加一列就会漏，流水表正好是 10 列，已经漏过一次。 */
+  .panel-body, .panel-head { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  table.grid { min-width: var(--table-min, 100%); }
+  table.grid th, table.grid td { padding: 9px 10px; }
+
+  .form-grid { grid-template-columns: 1fr; gap: 10px; }
+  .filters .field { min-width: 130px; flex: 1 1 130px; }
+
+  /* 弹窗几乎铺满：手机上贴边比居中留白好用，按钮也更好点 */
+  .modal-mask { padding: 0; align-items: stretch; }
+  .modal, .modal.wide { max-width: none; border-radius: 0; min-height: 100%; }
+  .modal-body { padding: 14px; }
+  .modal-foot {
+    position: sticky; bottom: 0; background: var(--panel);
+    padding: 10px 14px; padding-bottom: calc(10px + env(safe-area-inset-bottom));
+  }
+  .modal-foot .btn { flex: 1 1 auto; justify-content: center; }
+
+  .btn { min-height: 38px; }
+  .btn.small { min-height: 32px; }
+
+  .toast-root { left: 10px; right: 10px; bottom: 10px; }
+  .toast { max-width: none; }
+
+  .detail-row { flex-direction: column; gap: 14px; }
+  .detail-fields { flex: 1 1 auto; min-width: 0; }
+  .detail-qr .qr-box img, .detail-qr .qr-box canvas, .detail-qr .qr-box table { max-width: 200px; }
+
+  .inline-row { flex-wrap: wrap; }
+  .inline-row .input { max-width: none; flex: 1 1 100%; }
+
+  /* 扫码结果页：几个按钮摊平排开，拇指够得着；
+     位置那块字号再大一点 —— 手机上多半是在货架前一边看一边对。 */
+  .scan-name { font-size: 19px; }
+  .scan-loc-value { font-size: 21px; }
+  .scan-start-row .btn { width: 100%; }
+  .scan-actions { flex-direction: column; }
+  .scan-actions .btn { width: 100%; }
+
+  .batch-bar { gap: 8px; padding: 8px 10px; }
+  .batch-info { width: 100%; }
+
+  .label-sheet { gap: 8px; }
+  .label-card { width: 100%; }
+
+  .alert-item { align-items: flex-start; }
+  .pos-items { line-height: 2.1; }
+}
+
 @media print {
   .topbar, .crumb, .no-print, .toast-root, .modal-mask { display: none !important; }
   body { background: #fff; }
@@ -280,3 +457,34 @@ table.grid td.num, table.grid th.num { text-align: right; }
   .panel-head, .panel-body { padding: 0; border: 0; }
   .label-card { border: 1px solid #d6dbe6; }
 }
+
+/* ---------- 发票 PDF 拖拽区（第十三轮） ----------
+   拖进来时高亮，让"松手就交给我"这件事看得见；
+   手机上没有拖拽，同一块区域点击就是选文件。 */
+.pdf-drop {
+  border: 2px dashed var(--line);
+  border-radius: var(--radius);
+  padding: 18px 14px;
+  text-align: center;
+  cursor: pointer;
+  color: var(--ink-soft);
+  transition: border-color .15s, background .15s;
+}
+.pdf-drop:hover, .pdf-drop.dragging {
+  border-color: var(--accent, #4a7dff);
+  background: rgba(74, 125, 255, .06);
+}
+.pdf-drop-msg { font-size: 14px; line-height: 1.6; word-break: break-all; }
+.pdf-drop-msg a { color: var(--accent, #4a7dff); }
+
+/* 发票选择弹窗（批量下载前勾选） */
+.inv-pick-list { max-height: 50vh; overflow: auto; border: 1px solid #eef1f7; border-radius: 8px; }
+.inv-pick-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 10px; border-bottom: 1px solid #eef1f7;
+  cursor: pointer; font-size: 14px;
+}
+.inv-pick-row:last-child { border-bottom: 0; }
+.inv-pick-row:hover { background: #f6f8fc; }
+.inv-pick-name { flex: 1; word-break: break-all; }
+.inv-pick-name .hint { margin-left: 8px; }

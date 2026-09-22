@@ -1,0 +1,24 @@
+{
+  "name": "fever-inventory-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "FEver 战队物资管理 —— 飞书共享版后端（数据存在飞书多维表格，本服务自身无状态）",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "init:base": "node init-base.js",
+    "check": "node check.js",
+    "smoke": "node smoke.js",
+    "probe:auth": "node probe-auth.js",
+    "perf": "node perf-probe.js",
+    "perf:write": "node perf-write.js",
+    "test:session": "node test-session.js",
+    "test:parallel": "node test-parallel.js",
+    "test:admin": "node test-admin.js",
+    "test:e2e": "node test-e2e.js",
+    "lint": "node --check index.js && node --check init-base.js && node --check check.js && node --check smoke.js && node --check probe-auth.js && node --check perf-probe.js && node --check perf-write.js && node --check test-e2e.js && node --check test-session.js && node --check test-parallel.js && node --check test-admin.js && node --check lib/feishu.js && node --check lib/store.js && node --check lib/session.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -93,33 +93,57 @@ module.exports.register = function (H) {
     assert(offenders.length === 0, '不该有登录相关代码，发现：' + offenders.join('；'));
   });
 
-  test('第一版不调用摄像头（第二版手机端才做）', async () => {
-    const offenders = [];
+  test('摄像头与扫码只出现在指定的扫码模块里（不散落各处，也不依赖在线服务）', async () => {
+    // 第一版的约束是"一律不准调用摄像头"。第二版要扫码，这条自然要放开，
+    // 但不是简单删掉 —— 放开成"只准集中在 js/scanner.js"：
+    // 摄像头 API 散着写的话，随便打开哪一页都可能弹相机授权，没人说得清是什么触发的。
+    const CAMERA = ['getUserMedia', 'enumerateDevices', 'BarcodeDetector'];
+    const scattered = [];
     files.filter((f) => /\.(js|html)$/.test(f)).forEach((f) => {
+      if (rel(f) === 'js/scanner.js') return;      // 扫码模块就是它该待的地方
       const text = read(f);
-      ['getUserMedia', 'enumerateDevices', 'BarcodeDetector', 'html5-qrcode'].forEach((needle) => {
-        if (text.includes(needle)) offenders.push(rel(f) + ' → ' + needle);
+      CAMERA.forEach((needle) => {
+        if (text.includes(needle)) scattered.push(rel(f) + ' → ' + needle);
       });
-      // HTML 里不能引摄像头扫码库
-      if (/<script[^>]+src="[^"]*html5-qrcode/.test(text)) {
-        offenders.push(rel(f) + ' → 引用了摄像头扫码库');
-      }
     });
-    assert(offenders.length === 0, '第一版不该调用摄像头，发现：' + offenders.join('；'));
+    assert(scattered.length === 0,
+      '摄像头调用只应出现在 js/scanner.js，发现：' + scattered.join('；'));
+
+    // 二维码必须在本机解，不能把拍到的图传到在线识别服务去
+    const online = [];
+    ['html5-qrcode', 'qrserver.com', 'zxing', 'jsqr-cdn'].forEach((needle) => {
+      files.forEach((f) => {
+        if (read(f).toLowerCase().includes(needle.toLowerCase())) {
+          online.push(rel(f) + ' → ' + needle);
+        }
+      });
+    });
+    assert(online.length === 0, '不该依赖在线扫码服务，发现：' + online.join('；'));
   });
 
-  test('页面里没有手机端专用写法（第一版只做电脑网页）', async () => {
-    const offenders = [];
-    files.filter((f) => /\.(js|html)$/.test(f)).forEach((f) => {
-      const text = read(f);
-      // 只允许打印用的 @media print，不允许面向手机屏幕的断点
-      const media = text.match(/@media[^{]*max-width[^{]*/g) || [];
-      media.forEach((m) => offenders.push(rel(f) + ' → ' + m.trim()));
-      ['viewport-fit=cover', 'apple-mobile-web-app', 'user-scalable'].forEach((needle) => {
-        if (text.includes(needle)) offenders.push(rel(f) + ' → ' + needle);
-      });
+  test('手机端写法集中在样式文件里，且不允许禁用缩放', async () => {
+    const html = read(path.join(V1, 'index.html'));
+    // 只看 viewport 这个 meta 标签本身。之前是拿整份 HTML 做子串匹配，
+    // 结果连注释里提一句"不写 user-scalable=no"都会被判违规 —— 太粗。
+    const tag = (/<meta[^>]*name=["']viewport["'][^>]*>/i.exec(html) || [''])[0];
+    assert(tag, '第二版要能在手机上用，首页必须有 viewport 的 meta 标签');
+
+    // 禁用缩放（user-scalable=no / maximum-scale=1）会让看不清小字的人没法放大，
+    // 无障碍上的代价太大，明确不许。
+    ['user-scalable=no', 'user-scalable=0', 'maximum-scale=1'].forEach((bad) => {
+      assert(tag.indexOf(bad) === -1, 'viewport 里不允许禁用缩放（出现了 ' + bad + '）');
     });
-    assert(offenders.length === 0, '不该有手机端专用写法，发现：' + offenders.join('；'));
+
+    // 手机断点只允许收在 css 里，别散进 js / html —— 散出去以后没人找得全
+    const scattered = [];
+    files.filter((f) => /\.(js|html)$/.test(f)).forEach((f) => {
+      const media = read(f).match(/@media[^{]*max-width[^{]*/g) || [];
+      media.forEach((m) => scattered.push(rel(f) + ' → ' + m.trim()));
+    });
+    assert(scattered.length === 0, '手机断点应写在 css 里，发现：' + scattered.join('；'));
+
+    const css = read(path.join(V1, 'css', 'style.css'));
+    assert(/@media\s*\(max-width:\s*720px\)/.test(css), '样式里应有手机断点（720px）');
   });
 
   test('页面引入的脚本全部来自本地目录，没有 CDN 依赖', async () => {
@@ -157,7 +181,7 @@ module.exports.register = function (H) {
 
   test('主页面引入了全部应用脚本（打开就能用）', async () => {
     const html = read(path.join(V1, 'index.html'));
-    ['db.js', 'rules.js', 'ops.js', 'stats.js', 'ui.js', 'qr.js', 'views.js',
+    ['db.js', 'rules.js', 'ops.js', 'stats.js', 'ui.js', 'qr.js', 'scanner.js', 'views.js',
       'views-commerce.js', 'actions.js', 'app.js'].forEach((n) => {
         assert(html.includes('js/' + n), '主页面应引入 ' + n);
       });

@@ -5,7 +5,11 @@
   "scripts": {
     "build:pages": "node scripts/build-pages.js",
     "verify:pages": "node scripts/verify-pages.js",
-    "test": "node test/test.js"
+    "build:feishu": "node scripts/build-feishu.js",
+    "test": "node test/test.js",
+    "test:remote-db": "node feishu/test/remote-db.js",
+    "test:feishu-auth": "node feishu/test/feishu-auth.js",
+    "test:feishu": "node feishu/test/remote-db.js && node feishu/test/feishu-auth.js"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.2.5"

@@ -173,6 +173,67 @@
     return dbPut('settings', { key: key, value: value, updatedAt: nowIso() });
   }
 
+  /**
+   * 当前使用者是不是管理员。
+   *
+   * 离线版（这个文件）里返回**永远是 true**：数据就在本机、只有一个人用，
+   * 没有"别人来批"这件事，把审批按钮藏起来只会让这个版本看起来是坏的。
+   * 飞书共享版里由服务端判定（见 feishu/js/db-remote.js 的同名方法）——
+   * 而且**服务端会强制校验**，前端这里只决定按钮要不要画出来。
+   */
+  function isAdmin() { return true; }
+
+  /**
+   * 当前使用者。离线版**没有登录这回事**，如实返回 null，
+   * 不编一个假账号出来。
+   *
+   * 这个方法存在（而不是没有）是刻意的：飞书版的数据层（feishu/js/db-remote.js）
+   * 有同名方法，两个数据层**接口必须一模一样** —— 界面代码是同一份，
+   * 少一个方法就会在其中一个版本里变成 "currentUser is not a function"。
+   * 调用方（rules.js 的 currentActor）据此把操作人写成「本机操作」。
+   */
+  function currentUser() { return null; }
+
+  /* ==================== 发票 PDF（第十三轮） ==================== */
+
+  /**
+   * 保存一张发票附件。file 为 null（没传 PDF）时返回一组空引用，
+   * 调用方（Ops.arrive）照常展开、不会往行里塞 undefined。
+   *
+   * 离线版没有服务器，PDF 的 base64 **直接存进发票行的 JSON 里**
+   * （IndexedDB 装得下，备份导出导入也天然带着它）。
+   * 飞书版（db-remote.js 的同名方法）是先传服务器、行里只留 fileRef ——
+   * 多维表格的文本格放不下整份 PDF。这个差异被隔离在数据层，
+   * 界面与 Ops 层看到的是同一个接口。
+   */
+  function saveInvoiceFile(file) {
+    if (!file) {
+      return Promise.resolve({ fileRef: '', fileData: '', fileName: '', fileSize: 0, fileMime: '' });
+    }
+    var mime = file.mime || 'application/pdf';
+    var size = file.size || Math.floor(file.base64.length * 3 / 4);
+    return Promise.resolve({
+      fileRef: '',
+      fileData: file.base64,
+      fileName: file.name,
+      fileSize: size,
+      fileMime: mime
+    });
+  }
+
+  /**
+   * 取一张发票的 PDF 本体。没有附件时 resolve null。
+   * 返回 { base64, fileName, mime }；界面拿它做下载 / 批量打包。
+   */
+  function loadInvoiceFile(invoice) {
+    if (!invoice || !invoice.fileData) return Promise.resolve(null);
+    return Promise.resolve({
+      base64: invoice.fileData,
+      fileName: invoice.fileName || '发票.pdf',
+      mime: invoice.fileMime || 'application/pdf'
+    });
+  }
+
   global.FEVER = global.FEVER || {};
   global.FEVER.DB = {
     DB_NAME: DB_NAME,
@@ -190,7 +251,19 @@
     remove: dbDelete,
     count: dbCount,
     getSetting: getSetting,
-    setSetting: setSetting
+    setSetting: setSetting,
+    isAdmin: isAdmin,
+    currentUser: currentUser,
+    saveInvoiceFile: saveInvoiceFile,
+    loadInvoiceFile: loadInvoiceFile,
+    /**
+     * 发送测试提醒（飞书提醒通道的诊断入口）。
+     * 离线版没有服务端、没有飞书，永远不可能发提醒 —— 拒绝并把话说清楚。
+     * 飞书版（db-remote.js）的同名方法会真发一条并返回飞书的原始结果。
+     */
+    notifyTest: function () {
+      return Promise.reject(new Error('离线版没有飞书提醒。要测提醒，请在飞书里打开应用后到设置页再试'));
+    }
   };
 
   if (typeof module !== 'undefined' && module.exports) {

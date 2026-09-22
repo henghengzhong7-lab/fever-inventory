@@ -77,6 +77,20 @@ function createServer(extraRoutes) {
   });
 }
 
+/**
+ * 一个页面最多等这么久。
+ *
+ * 为什么要设这个：页面侧靠"闸门图片"（/e2e-hang 那条永不回应的请求）拖住 load 事件，
+ * 测试跑完时把它换成 data URL，浏览器才认为加载完成、`--dump-dom` 才把 DOM 吐出来。
+ * 只要有一个环节没走到（测试抛在半路、页面自己卡住），Chrome 就会一直等下去，
+ * **而且没有任何超时** —— 整个测试套就停在这一页上不动了，看起来像"跑了一辈子"。
+ * 实测踩过一次：全套跑了一页多就再没动静。
+ */
+const PAGE_TIMEOUT_MS = Number(process.env.E2E_PAGE_TIMEOUT_MS || 150000);
+
+/** 超时时缀在 DOM 尾巴上的标记，由 runPage 认领并抹掉 */
+const TIMEOUT_MARK = '<!--E2E_PAGE_TIMEOUT-->';
+
 /** 打开一个页面并把 <pre id="e2e-out"> 的内容取回来 */
 function openPage(url, opts) {
   const o = opts || {};
@@ -91,9 +105,21 @@ function openPage(url, opts) {
   return new Promise((resolve, reject) => {
     const cp = spawn(chrome, args, { stdio: ['ignore', 'pipe', 'ignore'] });
     let out = '';
+    let settled = false;
+    let timedOut = false;
+    const finish = (value) => { if (settled) return; settled = true; clearTimeout(timer); resolve(value); };
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { cp.kill(); } catch { /* 可能已经退出了 */ }
+      // 把已经拿到的 DOM 交回去（页面侧每跑完一个用例就 flush 一次，
+      // 所以这里通常是"跑到哪儿了"的有效证据），由上层如实报成超时。
+      finish(out + TIMEOUT_MARK);
+    }, o.timeoutMs || PAGE_TIMEOUT_MS);
+
     cp.stdout.on('data', (d) => { out += d.toString('utf8'); });
-    cp.on('error', reject);
-    cp.on('close', () => resolve(out));
+    cp.on('error', (err) => { if (settled) return; settled = true; clearTimeout(timer); reject(err); });
+    cp.on('close', () => { if (!timedOut) finish(out); });
   });
 }
 
@@ -118,9 +144,16 @@ async function runPage(server, routePath, profile, port) {
   await new Promise((resolve) => server.listen(port || 0, '127.0.0.1', resolve));
   const actualPort = server.address().port;
   const url = 'http://127.0.0.1:' + actualPort + routePath;
-  const dom = await openPage(url, { profile });
+  const raw = await openPage(url, { profile });
+  const timedOut = raw.indexOf(TIMEOUT_MARK) !== -1;
+  const dom = timedOut ? raw.replace(TIMEOUT_MARK, '') : raw;
   server.close();
-  return { dom, text: extract(dom) };
+  // 必须强制断掉还挂着的连接：/e2e-hang 那条请求本来就是"一直不回应"的，
+  // 浏览器被超时强杀时它往往还开着，server.close() 会一直等它，
+  // 于是整个测试套停在这一页上不动了（并且没有任何提示）。
+  if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
+  else if (typeof server.closeIdleConnections === 'function') server.closeIdleConnections();
+  return { dom, text: extract(dom), timedOut };
 }
 
 module.exports = { ROOT, createServer, openPage, extract, runPage, findChrome };

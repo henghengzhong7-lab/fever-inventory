@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>探针 · 驳回框里到底是哪一条</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <img id="e2e-gate" src="/e2e-hang" alt="" style="display:none">
+  <header class="topbar">
+    <div class="brand" id="brand-home"><span class="brand-mark">FE</span><span class="brand-text">FEver</span></div>
+    <nav class="main-nav" id="main-nav"></nav>
+  </header>
+  <div class="crumb" id="crumb"></div>
+  <main id="view-root" class="view-root"></main>
+  <div id="modal-root"></div>
+  <div id="toast-root" class="toast-root"></div>
+  <pre id="e2e-out" style="display:none"></pre>
+
+  <script src="/js/lib/qrcode.min.js"></script>
+  <script src="/js/db.js"></script>
+  <script src="/js/rules.js"></script>
+  <script src="/js/ops.js"></script>
+  <script src="/js/stats.js"></script>
+  <script src="/js/modules/mechanical.js"></script>
+  <script src="/js/modules/electronic.js"></script>
+  <script src="/js/modules/vision.js"></script>
+  <script src="/js/modules/hardware.js"></script>
+  <script src="/js/ui.js"></script>
+  <script src="/js/qr.js"></script>
+  <script src="/js/views.js"></script>
+  <script src="/js/views-commerce.js"></script>
+  <script src="/js/actions.js"></script>
+  <script src="/js/app.js"></script>
+
+  <script>
+  (function () {
+    var out = document.getElementById('e2e-out');
+    var lines = [];
+    function say(s) { lines.push(String(s)); }
+    function done() {
+      out.textContent = lines.join('\n');
+      out.setAttribute('data-done', 'probe');
+      var gate = document.getElementById('e2e-gate');
+      if (gate) gate.src = 'data:image/gif;base64,R0lGODlhAQABAAAAACw=';
+    }
+    function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+    function waitFor(label, fn, ms) {
+      var start = Date.now();
+      return new Promise(function (resolve) {
+        (function tick() {
+          var v = false;
+          try { v = fn(); } catch (e) { v = false; }
+          if (v) { say('OK  ' + label); return resolve(v); }
+          if (Date.now() - start > (ms || 4000)) { say('TIMEOUT ' + label); return resolve(null); }
+          setTimeout(tick, 40);
+        })();
+      });
+    }
+    function click(node) { node.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window })); }
+
+    var FEVER = window.FEVER;
+
+    (async function () {
+      await FEVER.Rules.clearAll();
+      await FEVER.Rules.initCategories();
+      var now = FEVER.DB.nowIso();
+
+      // 完全照抄测试 4 的做法：先用表单口径建一条，再直接种一条
+      await FEVER.Ops.createRequest({
+        categoryId: 'vision', troop: '步兵', name: '工业相机', quantity: 2,
+        budget: '6000', applicant: '张三', purpose: '色块识别'
+      });
+      await FEVER.DB.add('purchaseRequests', {
+        categoryId: 'electronic', troop: '无人机', name: '备用电调', spec: '', quantity: 2, budget: '900',
+        purpose: '备用', applicant: '赵六', status: 'pending', approval: 'pending', createdAt: now, updatedAt: now
+      });
+
+      var all = await FEVER.DB.getAll('purchaseRequests');
+      say('申请列表：' + JSON.stringify(all.map(function (r) { return { id: r.id, name: r.name, approval: r.approval, idType: typeof r.id }; })));
+
+      FEVER.App.goto('purchases');
+      await waitFor('采购页渲染', function () { return document.querySelector('[data-reject]'); });
+
+      var rejectBtns = Array.prototype.slice.call(document.querySelectorAll('[data-reject]'));
+      say('页面上有 ' + rejectBtns.length + ' 个驳回按钮，值分别是：' + rejectBtns.map(function (b) { return b.getAttribute('data-reject'); }).join(','));
+      var rows = Array.prototype.slice.call(document.querySelectorAll('#view-root table tbody tr'));
+      say('表格行数 ' + rows.length + '，第一行文字 = ' + JSON.stringify(rows[0] ? rows[0].textContent.replace(/\s+/g, ' ').slice(0, 80) : ''));
+
+      var target = rejectBtns[0];
+      say('要点的是 data-reject=' + target.getAttribute('data-reject') + '（它所在行：' +
+        JSON.stringify(target.closest('tr').textContent.replace(/\s+/g, ' ').slice(0, 60)) + '）');
+      click(target);
+
+      var mask = await waitFor('弹窗出现', function () { return document.querySelector('.modal-mask'); });
+      say('弹窗数量 = ' + document.querySelectorAll('.modal-mask').length);
+      if (mask) {
+        say('弹窗文字 = ' + JSON.stringify(mask.textContent.replace(/\s+/g, ' ')));
+        say('弹窗 HTML 片段 = ' + JSON.stringify(mask.innerHTML.replace(/\s+/g, ' ').slice(0, 400)));
+      }
+      done();
+    })().catch(function (err) {
+      say('探针自己抛错：' + (err && err.stack ? err.stack : err));
+      done();
+    });
+  })();
+  </script>
+</body>
+</html>

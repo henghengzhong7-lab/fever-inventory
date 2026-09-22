@@ -105,7 +105,9 @@ node v1/server.js --no-open
 
 1. 将 GitHub Pages 地址填入应用的“首页地址/应用主页”一类配置：
    `https://henghengzhong7-lab.github.io/fever-inventory/`。
-2. 如果平台要求配置可信域名，填主机名，不要填路径：`henghengzhong7-lab.github.io`，而不是完整 URL。
+2. 如果平台要求配置可信域名（H5 可信域名），这一栏校验的是**完整 URL**，要带 `https://`、
+   并且**不要带路径**：`https://henghengzhong7-lab.github.io`（这是 GitHub Pages 的主机名；
+   本项目现在用的是 `https://fever-inventory.app.workbuddy.host`）。
 3. 如果平台要求重定向地址，填写完整 HTTPS 地址，并使用最终会访问的路径：
    `https://henghengzhong7-lab.github.io/fever-inventory/`。
 4. 发布或启用应用后，将应用分配给测试人员或企业内部成员。

@@ -1,0 +1,11 @@
+{
+  "appId": "cli_xxxxxxxxxxxxxxxx",
+  "appSecret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "bitableAppToken": "",
+  "tableIds": {},
+  "folderToken": "",
+  "allowedOrigins": ["*"],
+  "allowedOpenIds": [],
+  "admins": [],
+  "sessionHours": 12
+}

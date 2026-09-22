@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>端到端测试 · 手机端适配</title>
+  <script>
+    window.__EARLY_ERRORS__ = [];
+    window.addEventListener('error', function (e) {
+      window.__EARLY_ERRORS__.push('加载期错误：' + (e.message || e.type) + ' @ ' + (e.filename || '') + ':' + (e.lineno || ''));
+    }, true);
+  </script>
+</head>
+<body>
+  <img id="e2e-gate" src="/e2e-hang" alt="" style="display:none">
+  <pre id="e2e-out" style="display:none"></pre>
+
+  <!--
+    这一页刻意**不**引入应用脚本：被测的是 iframe 里的真实首页。
+    理由见 scripts/mobile-tests.js 顶部。
+  -->
+  <script src="/test/e2e/scripts/lib.js"></script>
+  <script src="/test/e2e/scripts/mobile-tests.js"></script>
+</body>
+</html>

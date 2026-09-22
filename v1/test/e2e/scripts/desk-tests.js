@@ -19,17 +19,12 @@
     return Array.prototype.slice.call(document.querySelectorAll(sel || '#txn-table tbody tr'));
   }
 
-  function gotoTab(name) {
-    App.goto(name);
-    return E2E.waitUntil('页面 ' + name + ' 渲染完成', function () {
-      return document.querySelector('#view-root').getAttribute('data-page') === name;
-    });
-  }
+  /** 切页并等到这次渲染真的画完（用 E2E.goto，理由见 lib.js 里的说明） */
+  function gotoTab(name) { return E2E.goto(name); }
 
+  /** 取最上面那个弹窗（弹窗会叠加，最后一个才是最新打开的） */
   function modal() {
-    return E2E.waitUntil('弹窗打开', function () {
-      return document.querySelector('.modal-mask');
-    }).then(function () { return document.querySelector('.modal-mask'); });
+    return E2E.waitUntil('弹窗打开', function () { return E2E.topModal(); });
   }
   function waitModalGone() {
     return E2E.waitUntil('弹窗关闭', function () { return !document.querySelector('.modal-mask'); });

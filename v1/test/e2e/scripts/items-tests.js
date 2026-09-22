@@ -61,6 +61,7 @@
       // 默认机械：应有机械专属字段，不该有视觉字段
       await E2E.waitUntil('机械专属字段出现', function () { return mask.querySelector('[name="x-vehicle"]'); });
       E2E.ok(mask.querySelector('[name="x-material"]'), '机械应有材质字段');
+      E2E.ok(mask.querySelector('[name="troop"]'), '直接入库也应有必填的兵种下拉（第十三轮）');
       E2E.ok(!mask.querySelector('[name="x-resolution"]'), '机械不该出现视觉的分辨率字段');
 
       // 切到视觉：字段应整体换掉
@@ -75,10 +76,28 @@
       await waitModalGone();
     });
 
+    await E2E.record('不选兵种保存会被拦下（第十三轮：直接入库也必须选兵种）', async function () {
+      var mask = await openNewItem();
+      fillIn(mask, 'categoryId', 'mechanical');
+      fillIn(mask, 'name', '没选兵种的件');
+      fillIn(mask, 'quantity', '1');
+      pickRadio(mask, 'identityMode', 'shared');
+      E2E.clickSelector('[data-ok]', mask);
+      await E2E.waitUntil('出现选兵种的提示', function () {
+        return document.getElementById('toast-root') &&
+          text('#toast-root').indexOf('兵种') !== -1;
+      }, 5000);
+      E2E.ok(E2E.topModal() !== null, '弹窗不该关掉 —— 数据没保存，让使用者补上再交');
+      var items = await DB.getAll('items');
+      E2E.ok(items.length === 0, '没选兵种就不该有物品落库，实际 ' + items.length);
+      await E2E.closeAllModals();
+    });
+
     await E2E.record('入库 1 件单独建身份：生成 1 个编码', async function () {
       var mask = await openNewItem();
       fillIn(mask, 'categoryId', 'vision');
       await E2E.waitUntil('视觉字段切换完成', function () { return mask.querySelector('[name="x-resolution"]'); });
+      fillIn(mask, 'troop', '其他');
       fillIn(mask, 'name', '工业相机');
       fillIn(mask, 'spec', '500万像素');
       fillIn(mask, 'location', '器材柜A');
@@ -100,6 +119,7 @@
       var mask = await openNewItem();
       fillIn(mask, 'categoryId', 'mechanical');
       await E2E.waitUntil('切回机械字段', function () { return mask.querySelector('[name="x-vehicle"]'); });
+      fillIn(mask, 'troop', '步兵');
       fillIn(mask, 'name', 'M4螺丝');
       fillIn(mask, 'quantity', '5');
       fillIn(mask, 'safetyStock', '20');
@@ -119,6 +139,7 @@
       var mask = await openNewItem();
       fillIn(mask, 'categoryId', 'vision');
       await E2E.waitUntil('视觉字段就绪', function () { return mask.querySelector('[name="x-resolution"]'); });
+      fillIn(mask, 'troop', '哨兵');
       fillIn(mask, 'name', '镜头');
       fillIn(mask, 'quantity', '3');
       pickRadio(mask, 'identityMode', 'single');
