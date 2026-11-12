@@ -22,6 +22,26 @@ const Module = require('node:module');
 
 const store = require('./lib/store');
 
+/**
+ * ⛔ 护栏：known-users.json 在**发布目录内**，而发布工具不读 .gitignore。
+ * 这个文件里的身份会被随包上传到线上；测试写进去的假 openId
+ * （本文件写的是 ou_admin_1 / ou_member_1）会留在生产环境里，
+ * 还会因为 at 时间戳比真人新而**顶掉真实登录记录** ——
+ * 表现是那个人从此收不到飞书提醒，而且日志里刷 99992351 无效 openId。
+ * 所以：跑之前备份，跑完原样写回。
+ */
+const KNOWN_PATH = path.join(__dirname, 'known-users.json');
+let knownBackup = null;
+try { knownBackup = fs.readFileSync(KNOWN_PATH); } catch (err) { knownBackup = null; }
+function restoreKnownUsers() {
+  try {
+    if (knownBackup === null) { if (fs.existsSync(KNOWN_PATH)) fs.unlinkSync(KNOWN_PATH); }
+    else fs.writeFileSync(KNOWN_PATH, knownBackup);
+  } catch (err) {
+    console.warn('[测试] 没能还原 known-users.json，请手动检查：' + err.message);
+  }
+}
+
 /* ==================== 假的多维表格 + 假发消息 ==================== */
 
 const FAKE = { tables: [], data: {}, calls: [], msgs: [], groupMsgs: [] };
@@ -333,5 +353,6 @@ function msgsTo(openId) {
   check('名单外的人不会被合并成管理员', mod.adminOpenIds().indexOf('ou_member_1') === -1);
 
   console.log('\n通过 ' + passed + ' 项，失败 ' + failed + ' 项');
+  restoreKnownUsers();
   if (failed) process.exitCode = 1;
 })();

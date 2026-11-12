@@ -64,6 +64,17 @@ const fakeFeishu = {
     FAKE.calls.push({ op: 'delete', tableId: tableId });
     FAKE.data[tableId] = (FAKE.data[tableId] || []).filter((r) => recordIds.indexOf(r.record_id) === -1);
     return recordIds.map(function (id) { return { record_id: id, deleted: true }; });
+  },
+  /**
+   * 发私聊提醒。第十三轮加了"提交采购申请提醒管理员"之后，
+   * applyOps 里会走到这里 —— 假实现缺了这个方法就是 TypeError，
+   * 会把整个用例带崩（本文件本来就是这个状态）。
+   * 只记录下来，不真发，也不假装失败：返回值与 lib/feishu.js 的真实实现同形状（Promise<true>）。
+   */
+  async sendMessage(cfg, openId, text) {
+    FAKE.notifications = FAKE.notifications || [];
+    FAKE.notifications.push({ openId: openId, text: String(text || '') });
+    return true;
   }
 };
 

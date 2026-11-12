@@ -80,8 +80,34 @@
    */
   var DELETE_LOG_KEY = 'deleteLog';
 
-  /** 只留最近这些条，免得 settings 那一列无限长下去 */
-  var DELETE_LOG_MAX = 300;
+  /**
+   * 只留最近这些条。
+   *
+   * 2026-10-20 由 **300 调到 50**。依据是实测（线上真实数据）：
+   *   · 每票带整条物品快照，平均约 **645 字节**；
+   *   · 删除的写请求是「删物品 + 写这一行」**同一个批次**发出的，而浏览器对
+   *     `keepalive` 请求正文的上限是 **64KB**，超了不是降级而是**整个请求被拒发**；
+   *   · 实测对照：50 票 ≈ 31.5KB（余量 32KB）✅ ／ 100 票 ≈ 63.2KB（余量仅 0.8KB）⚠️
+   *     ／ 122 票 ≈ 65.3KB → 越过上限，**每次删除必失败**（页面报"服务器异常，稍后重试"）。
+   *
+   * 取 50 而不是更贴近上限的数：额度是在飞请求**共享**的，要留一半给"一大一小同时在飞"。
+   * 50 票也足够追溯最近几十次删除（此前是按 300 留的，实际用不到那么多）。
+   */
+  var DELETE_LOG_MAX = 50;
+
+  /**
+   * 删除记录的**字符**预算（在条数之外的第二道闸）。
+   *
+   * 为什么条数闸不够：每一票都带被删对象的完整快照，快照大小不一 —— 条数不涨，
+   * 体积也会涨。而飞书多维表格的**多行文本单元格上限 10 万字符**，超了那一格就
+   * 写不进去；删除记录又和删除本身在同一个写入批次里，日志写失败会把删除一起
+   * 拖失败，物品又删不掉。
+   *
+   * 实测（2026-10 线上）：122 票、60,699 字符；照每票约 500 字符涨到 300 票会是
+   * 14.9 万字符，必然越过飞书的上限。这里取 8 万：留两成余量给字段里其余内容，
+   * 实际能留一百多票 —— 丢的是最老的那几票，和条数闸同一个规矩。
+   */
+  var DELETE_LOG_MAX_CHARS = 80000;
 
   /** 当前操作人。离线版没有登录，如实写成「本机操作」而不是编一个名字 */
   function currentActor() {
@@ -146,7 +172,22 @@
   function mergeDeleteLog(current, fresh) {
     var rows = (Array.isArray(current) ? current : []).concat(fresh || []);
     if (rows.length > DELETE_LOG_MAX) rows = rows.slice(rows.length - DELETE_LOG_MAX);
-    return rows;
+    return trimDeleteLogChars(rows);
+  }
+
+  /**
+   * 按字符数再收一道：从最老的一票开始丢，直到整体回到预算内。
+   * 最后一票无论如何都留着 —— 它记的是刚才那次删除，丢了就等于这次没留痕。
+   */
+  function trimDeleteLogChars(rows) {
+    var total = JSON.stringify(rows).length;
+    if (total <= DELETE_LOG_MAX_CHARS) return rows;
+    var drop = 0;
+    while (drop < rows.length - 1 && total > DELETE_LOG_MAX_CHARS) {
+      total -= JSON.stringify(rows[drop]).length + 1;   // +1 是数组元素之间那个逗号
+      drop += 1;
+    }
+    return rows.slice(drop);
   }
 
   /**
@@ -181,6 +222,60 @@
   }
 
   function clearDeleteLog() { return setSettingSafe(DELETE_LOG_KEY, []); }
+
+  /**
+   * 选填金额：空 → null；填了必须是不小于 0 的数字。
+   * 返回 { ok, value, message }，**不抛异常** —— 入库（ops.js）和编辑物品（app.js）
+   * 共用这一份规则，否则"入库时拦得住、编辑时拦不住"，两边各写一份必然跑偏。
+   */
+  function parseOptionalPrice(value) {
+    var raw = (value === undefined || value === null) ? '' : String(value).trim();
+    if (raw === '') return { ok: true, value: null };
+    var amount = Number(raw);
+    if (isNaN(amount) || amount < 0) {
+      return { ok: false, message: '要填一个不小于 0 的数字，或者留空不填' };
+    }
+    return { ok: true, value: amount };
+  }
+
+  /** 选填日期：空 → ''；填了原样收下（日期输入框给的是 YYYY-MM-DD） */
+  function parseOptionalDate(value) {
+    return { ok: true, value: (value === undefined || value === null) ? '' : String(value).trim() };
+  }
+
+  /**
+   * 名称归一化：只用来**比较是否同名**，绝不回写数据。
+   * 去掉首尾空格、把全角空格和连续空白并成一个、英文统一小写 ——
+   * 「M4 螺丝 」「m4  螺丝」算同一个名字，否则使用者的手误就会让同名检测失灵。
+   */
+  function nameKey(name) {
+    return String(name === undefined || name === null ? '' : name)
+      .replace(/[\u3000\s]+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+
+  /**
+   * 找出与给定名称**同名**的现有物品（第二十四轮：同名要归同一个大类）。
+   *
+   * 返回 [{ name, categoryId, code }...]，按传入顺序。空名称一律返回空数组 ——
+   * 没填名字时不该冒出"已有同名"的提示。
+   */
+  function sameNameItems(items, name) {
+    var key = nameKey(name);
+    if (!key) return [];
+    return (items || []).filter(function (it) { return it && nameKey(it.name) === key; });
+  }
+
+  /** 一条流水在人话里怎么说（单条删除、批量删除清单、删除记录共用一个口径） */
+  function txnLabel(row) {
+    if (!row) return '';
+    var parts = [(TXN_TYPES[row.type] || row.type), row.itemCode || ''];
+    if (row.itemName) parts.push(row.itemName);
+    parts.push('× ' + num(row.qty));
+    if (row.operator) parts.push('（' + row.operator + '）');
+    return parts.filter(function (x) { return !!x; }).join(' ');
+  }
 
   /**
    * 这件物品能不能删。能删返回 null，不能删返回原因（人话）。
@@ -269,8 +364,61 @@
    * 所以以后要改名（比如「前哨战」改成「前哨站」）必须同时提供
    * 旧值的迁移映射，否则已经存在的申请会掉到预算之外 ——
    * 见 troopOf() 里的兼容处理。
+   *
+   * 第十四周：「步兵」细分成「轮腿步兵 / 过洞步兵 / 可折叠步兵」。
+   * 处理方式是**加新的，不动旧的**：
+   *   · 「步兵」仍留在这里（TROOP_LEGACY），只是不再出现在任何下拉框里
+   *     （下拉框统一用 TROOP_OPTIONS）。
+   *   · 为什么不直接删掉：它已经是历史数据的预算归类键。删了之后
+   *     normalizeTroop 会把所有老申请归到「其他」，那些钱就静默改了归属 ——
+   *     正是上面那段注释警告的情况。保留它，老申请的兵种预算分文不动。
+   *
+   * 第二十二轮：按需求方要求新增「舵轮机器人 / 老步兵机器人 / 新步兵机器人」。
+   * 同样是**纯新增、旧的保留** —— 这三套是按车型代次分的，和上面的"按运动方式分"
+   * 两套并存（需求方明确选了"旧的保留"）。所以一个都没删、一个都没改名，
+   * 老数据的兵种归属与预算分文不动，只是下拉框多了三个选项。
+   *
+   * 第二十五轮：再加「英雄」「小轮腿」（同样是纯新增）。
+   * 「小轮腿」跟在轮腿类后面，「英雄」跟在三个机器人后面 —— 只影响下拉框与预算表的排序，
+   * 不影响任何历史数据的归属。
+   *
+   * ⚠️ 以后要删/改兵种名，必须先想清楚历史数据怎么办（照 TROOP_LEGACY 那套做法）。
    */
-  var TROOPS = ['重装', '步兵', '哨兵', '飞镖', '无人机', '雷达', '前哨战', '能量机关', '其他'];
+  var TROOPS = ['重装', '步兵', '轮腿步兵', '过洞步兵', '可折叠步兵', '小轮腿',
+    '舵轮机器人', '老步兵机器人', '新步兵机器人', '英雄',
+    '哨兵', '飞镖', '无人机', '雷达', '前哨战', '能量机关', '其他'];
+
+  /**
+   * 历史值：只用于读取与归一化，不出现在任何表单里。
+   * 判断依据是"这个值曾经是合法兵种，且可能已经写进了老数据"。
+   */
+  var TROOP_LEGACY = ['步兵'];
+
+  /**
+   * **筛选栏**里的兵种列表 = 全量可选兵种 + 数据里出现过的历史值（第二十二轮）。
+   *
+   * ⚠️ 原来采购申请页的兵种筛选是"从现有申请里收集出现过的值"，
+   * 于是**还没人提过申请的兵种根本不出现在下拉框里** ——
+   * 使用者看到的就是「采购申请里的兵种不全」（本轮用户反馈）。
+   * 兵种是固定清单的枚举，跟"申请人"不一样，必须全列；
+   * 再把数据里真实出现过的历史值（老的「步兵」）补上，否则那些申请筛不出来。
+   *
+   * 入参 existingValues：数据里出现过的兵种值（可以重复、可以是空的）。
+   * 纯函数，好直接断言。
+   */
+  function troopFilterList(existingValues) {
+    var list = TROOP_OPTIONS.slice();
+    (existingValues || []).forEach(function (raw) {
+      var v = normalizeTroop(raw);
+      if (v && list.indexOf(v) === -1) list.push(v);
+    });
+    return list;
+  }
+
+  /** 表单可选的兵种 —— 新增申请、编辑物品、直接入库都用它 */
+  var TROOP_OPTIONS = TROOPS.filter(function (t) {
+    return TROOP_LEGACY.indexOf(t) === -1;
+  });
 
   /** 兜底兵种：认不出来的兵种一律归到这里，保证预算汇总不会漏账 */
   var TROOP_FALLBACK = '其他';
@@ -278,6 +426,7 @@
   /**
    * 把任意值规范成一个合法兵种。
    * 空值 → ''（表示未指定）；不认识的值 → 「其他」。
+   * 历史值（如「步兵」）算合法：老数据必须原样保留，不能被改写归属。
    */
   function normalizeTroop(value) {
     var raw = value === undefined || value === null ? '' : String(value).trim();
@@ -295,6 +444,114 @@
   }
 
   /**
+   * 编辑一条**已有**记录时该给哪些兵种选项。
+   *
+   * 比 TROOP_OPTIONS 多一件事：把这条记录现在的值临时补进来。
+   * 不补的后果是——老记录是「步兵」，下拉框里没有这一项，
+   * 浏览器会把 select 落回第一个选项，用户只是改个名字点了保存，
+   * 兵种就被静默改掉了（normalizeTroop 再也救不回来，值从界面上丢了）。
+   * 插在「重装」之后，位置和它在新列表里的位置一致。
+   */
+  function troopChoices(current) {
+    var list = TROOP_OPTIONS.slice();
+    var cur = normalizeTroop(current);
+    if (cur && list.indexOf(cur) === -1) list.splice(1, 0, cur);
+    return list;
+  }
+
+  /**
+   * 「设置兵种预算」弹窗里该列哪些兵种。
+   *
+   * = 常规选项 + **已经配过额度的历史兵种**，顺序与 troopChoices 一致
+   * （历史值插在「重装」之后）。
+   *
+   * 为什么要把历史兵种列出来：老数据里「步兵」可能还压着预算。
+   * 界面上不列它，等于这笔钱只能看不能改 —— 用户要清空或调整都没入口。
+   * 反过来，没人配过额度的历史兵种就不显示，新用户看到的仍是干净的一份列表。
+   */
+  function budgetTroops(existingMap) {
+    var map = existingMap && typeof existingMap === 'object' ? existingMap : {};
+    var list = TROOP_OPTIONS.slice();
+    TROOP_LEGACY.forEach(function (t) {
+      var v = map[t];
+      if (v === undefined || v === null || v === '') return;
+      list.splice(1, 0, t);
+    });
+    return list;
+  }
+
+  /**
+   * 全局搜索（第十五轮）：在一个关键字下找物品与大类。
+   *
+   * 纯函数 —— 不读库、不碰 DOM，好直接断言。
+   * 物品按 编码 / 名称 / 规格 / 位置 / 兵种 / 所属大类名 匹配；
+   * 大类按 名称 / 说明 / id 匹配。
+   * 只搜物品与大类，**不搜单据**：需求方要的是"搜索单个物品，和大类物品"，
+   * 把采购申请、发票、流水一起塞进来只会让结果变杂；找单据走页面互联那几条路。
+   */
+  function searchAll(items, categories, keyword, limit) {
+    var kw = (keyword === undefined || keyword === null ? '' : String(keyword)).trim().toLowerCase();
+    if (!kw) return { keyword: '', categories: [], items: [], itemTotal: 0, categoryTotal: 0 };
+    var cats = categories || [];
+    var nameOf = {};
+    cats.forEach(function (c) { nameOf[c.id] = c.name; });
+
+    var hitCats = cats.filter(function (c) {
+      return [c.name, c.description, c.id].join(' ').toLowerCase().indexOf(kw) !== -1;
+    });
+    var hitItems = (items || []).filter(function (it) {
+      var hay = [it.code, it.name, it.spec, it.location, it.troop,
+        nameOf[it.categoryId] || it.categoryId].join(' ').toLowerCase();
+      return hay.indexOf(kw) !== -1;
+    });
+
+    var cap = num(limit) > 0 ? num(limit) : 60;
+    return {
+      keyword: kw,
+      categories: hitCats,
+      items: hitItems.slice(0, cap),
+      itemTotal: hitItems.length,
+      categoryTotal: hitCats.length,
+      // 超过上限时界面要如实说"还有多少没显示"，不能让人以为只有这些
+      truncated: hitItems.length > cap
+    };
+  }
+
+  /**
+   * 打包提交的批次号（第十五轮）。
+   *
+   * 形如 `B-20261006-4F7K`：前缀 + 日期 + 4 位随机。
+   * 日期是为了让人一眼看出是哪天报的一批；随机尾巴只负责同一天内不撞。
+   * 它只是采购申请行上的一个普通字段，**不动多维表格的表结构** ——
+   * 整批同意、批量确认到货、按批次打包发票都靠它把这批认出来。
+   */
+  function newBatchId(nowIso, rand) {
+    var d = nowIso ? new Date(nowIso) : new Date();
+    if (isNaN(d.getTime())) d = new Date();
+    function p(n) { return String(n).padStart(2, '0'); }
+    var day = String(d.getFullYear()) + p(d.getMonth() + 1) + p(d.getDate());
+    var tail = rand === undefined ? Math.random().toString(36).slice(2, 8) : String(rand);
+    tail = tail.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+    while (tail.length < 4) tail += 'X';
+    return 'B-' + day + '-' + tail;
+  }
+
+  /**
+   * 「待提交清单」算谁的。
+   * 有飞书身份就按 openId 隔离，离线版只有一个本机格子。
+   * 清单存在**共享库的 settings 里**（键 = `draftCart:<ownerKey>`），
+   * 所以手机上攒一半、回电脑能接着攒，而队友看不到你的草稿。
+   */
+  function ownerKey(user) {
+    var openId = user && user.openId ? String(user.openId).trim() : '';
+    return openId ? ('openId:' + openId) : 'local';
+  }
+
+  function draftCartKey(key) {
+    return 'draftCart:' + (key || 'local');
+  }
+
+  /**
    * 一张发票在界面上显示的名字。
    * 发票号码改为选填后（第十三轮），没填号的发票不能显示成空白按钮 ——
    * 回退到 PDF 文件名，再不行用登记序号。所有显示发票入口的地方都用这一个函数，
@@ -306,8 +563,37 @@
   }
 
   /**
-   * 四个大类的配置。extraFields 是大类专属字段，
-   * reminders 是该大类的提醒默认值（天数），都可以在界面上改。
+   * 补协议时用的默认协议名。
+   * 单独提出来是为了不在源码里写死一整条示例地址 ——
+   * 离线版有一条硬约束：应用文件里不允许出现任何指向外网的地址字面量
+   * （v1 的 cases/offline.js 会逐文件扫）。拼出来的字符串不算，所以链接一律动态拼。
+   */
+  var DEFAULT_SCHEME = 'https';
+
+  /**
+   * 规范购买链接（第十四周新增）。
+   *
+   * 允许 http / https；没写协议时补 https —— 多数人是直接从商城复制粘贴。
+   * 其它协议一律判无效：这个值最后会被渲染成 <a href>，
+   * 放行 javascript: / data: 之类等于自己开一个注入口子。
+   * 返回 '' 表示没填、或填得没法用（调用方按"没填"处理）。
+   */
+  function purchaseLink(value) {
+    var raw = value === undefined || value === null ? '' : String(value).trim();
+    if (!raw) return '';
+    // 有协议头就尊重它（http 的旧站点也允许），没有就补 https
+    var url = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw) ? raw : (DEFAULT_SCHEME + '://' + raw);
+    if (!/^https?:\/\//i.test(url)) return '';
+    if (/\s/.test(url)) return '';
+    // 后面至少得有"域名.后缀"，挡住只填了协议头或半个域名的输入
+    if (!/^https?:\/\/[^\s/.]+\.[^\s/]{2,}/i.test(url)) return '';
+    return url;
+  }
+
+  /**
+   * 大类配置（第十四周起是六个：机械 / 电控 / 视觉 / 硬件 / 宣传 / 通用）。
+   * extraFields 是大类专属字段，reminders 是该大类的提醒默认值（天数）。
+   * sortOrder 决定首页卡片与各处下拉框的顺序，新大类往后排。
    */
   var CATEGORY_DEFS = [
     {
@@ -360,15 +646,17 @@
       description: '相机、镜头、光源',
       defaultIdentityMode: 'single',
       searchFields: ['lensMount', 'cameraPair'],
-      reminders: { calibrationDays: 90, toolCalibrationDays: 0, spareCycleDays: 365 },
+      // 第二十四轮：**视觉类不做标定**（需求方明确说不需要），
+      // 所以 calibrationDays 归零 —— 提醒逻辑是「> 0 才提醒」，归零即彻底不提醒。
+      // 物品上原来的 calibrationStatus / lastCalibrationDate 两个键**保留在数据里**，
+      // 只是不再作为专属字段出现、界面也不再显示（数据删了不可恢复）。
+      reminders: { calibrationDays: 0, toolCalibrationDays: 0, spareCycleDays: 365 },
       extraFields: [
         { key: 'resolution', label: '分辨率', type: 'text', placeholder: '如：500万像素' },
         { key: 'frameRate', label: '帧率', type: 'text', placeholder: '如：60fps' },
         { key: 'focalLength', label: '焦距/视场角', type: 'text', placeholder: '如：12mm/60°' },
         { key: 'lensMount', label: '镜头接口', type: 'select', options: ['CS', 'C', 'M12', '其它'] },
-        { key: 'cameraPair', label: '配套相机', type: 'text', placeholder: '如：配 VS-0002' },
-        { key: 'calibrationStatus', label: '标定状态', type: 'select', options: ['未标定', '已标定', '需重新标定'] },
-        { key: 'lastCalibrationDate', label: '最近标定日期', type: 'date' }
+        { key: 'cameraPair', label: '配套相机', type: 'text', placeholder: '如：配 VS-0002' }
       ]
     },
     {
@@ -390,21 +678,69 @@
         { key: 'isTool', label: '是否工具', type: 'select', options: ['否', '是'] },
         { key: 'lastCalibrationDate', label: '最近校准日期', type: 'date' }
       ]
+    },
+    /**
+     * 宣传、通用（第十四轮新增）。
+     *
+     * 这两类**没有专属模块**（`js/modules/` 下没有 promo.js / general.js），
+     * 是刻意留白的：它们不需要"相机标定""工具校准"这类专属面板，
+     * 用通用的物品清单 + 筛选就够了。
+     * views.js 的 category() 对拿不到模块的大类是安全的（moduleOf 返回 null，
+     * 专属工作区与专属筛选项整块不渲染），首页卡片则回退到"在库/种类/借出/待修"四个通用指标。
+     * 所以新增大类**不需要**跟着写一个模块文件；哪天它们需要专属能力，再加模块即可。
+     *
+     * 编码前缀与那四个大类一样会印在标签上，改了会让老标签的含义变化，
+     * 所以一旦用过就别再改 prefix。
+     */
+    {
+      id: 'promo',
+      name: '宣传',
+      icon: '◈',
+      prefix: 'PR',
+      sortOrder: 5,
+      description: '宣传物料、周边、展品',
+      defaultIdentityMode: 'shared',
+      searchFields: ['size'],
+      reminders: { calibrationDays: 0, toolCalibrationDays: 0, spareCycleDays: 365 },
+      extraFields: [
+        { key: 'size', label: '尺寸规格', type: 'text', placeholder: '如：60x90cm' },
+        { key: 'material', label: '材质', type: 'text', placeholder: '如：PVC 板 / 涤纶布' },
+        { key: 'activity', label: '用于活动', type: 'text', placeholder: '如：2026 赛季招新' },
+        { key: 'maker', label: '制作方', type: 'text', placeholder: '如：校门口那家广告店' }
+      ]
+    },
+    {
+      id: 'general',
+      name: '通用',
+      icon: '▤',
+      prefix: 'GN',
+      sortOrder: 6,
+      description: '跨兵种共用、不好归类的物资',
+      defaultIdentityMode: 'shared',
+      searchFields: ['usage'],
+      reminders: { calibrationDays: 0, toolCalibrationDays: 0, spareCycleDays: 365 },
+      extraFields: [
+        { key: 'usage', label: '主要用途', type: 'text', placeholder: '如：全场通用耗材' },
+        { key: 'belongTo', label: '归属', type: 'text', placeholder: '如：队部 / 公共工具柜' }
+      ]
     }
   ];
 
-  var CATEGORY_PREFIX = { mechanical: 'MC', electronic: 'EL', vision: 'VS', hardware: 'HW' };
+  var CATEGORY_PREFIX = {
+    mechanical: 'MC', electronic: 'EL', vision: 'VS', hardware: 'HW',
+    promo: 'PR', general: 'GN'
+  };
 
   /**
-   * 首次运行时写入四个大类配置。
-   * 已存在的大类不会被覆盖，避免把使用者改过的字段定义冲掉。
+   * 首次运行时写入大类配置（当前六个）。
+   * 已存在的大类不会被覆盖，避免把使用者改过的字段定义冲掉；
+   * 后来新增的大类靠这里补写 —— 老用户升级后自动多出「宣传」「通用」，不用手工建。
    */
   function initCategories() {
     return DB.runTx('categories', 'readwrite', function (T) {
       return T.getAll('categories').then(function (existing) {
         var haveIds = existing.map(function (c) { return c.id; });
         var toAdd = CATEGORY_DEFS.filter(function (def) { return haveIds.indexOf(def.id) === -1; });
-        if (toAdd.length === 0) return existing;
         var created = DB.nowIso();
         return toAdd.reduce(function (chain, def) {
           return chain.then(function () {
@@ -415,8 +751,46 @@
         }, Promise.resolve()).then(function () {
           // 同一事务内能读到自己刚写入的数据
           return T.getAll('categories');
+        }).then(function (list) {
+          return fixVisionCalibration(T, list);
         });
       });
+    });
+  }
+
+  /**
+   * 定向修正：**视觉类不做标定**（第二十四轮）。
+   *
+   * 为什么不能只改 CATEGORY_DEFS 里那个默认值：initCategories **只补缺的大类、
+   * 不覆盖已有的**（不然会把使用者改过的字段定义冲掉）。所以老库里视觉类那一行
+   * 仍然是 `reminders.calibrationDays: 90`，首页照样提醒「尚未标定」——
+   * 只改默认值等于对新用户生效、对老用户无效。
+   *
+   * 这里做一次**定向、幂等**的修正：只动视觉类的这两个键
+   *   ① reminders.calibrationDays 归零（提醒逻辑是「> 0 才提醒」）
+   *   ② 从专属字段里摘掉「标定状态」
+   * 其余一律不碰（描述、图标、顺序、别的字段、别的提醒周期都可能是使用者改过的）。
+   * **已经是新样子就不写库**，保证正常启动不会每次都产生一次写。
+   *
+   * ⚠️ 注意：物品上已经填过的 `calibrationStatus` / `lastCalibrationDate` **不清除** ——
+   * 数据删了不可恢复，留着只是不显示、不提醒。将来要是又需要标定，值还在。
+   */
+  function fixVisionCalibration(T, list) {
+    var target = list.filter(function (c) { return c.id === 'vision'; })[0];
+    if (!target) return list;
+    var before = target.extraFields || [];
+    var fields = before.filter(function (f) { return f.key !== 'calibrationStatus'; });
+    var rem = Object.assign({}, target.reminders || {});
+    if (num(rem.calibrationDays) === 0 && fields.length === before.length) return list;
+
+    rem.calibrationDays = 0;
+    var next = Object.assign({}, target, {
+      reminders: rem,
+      extraFields: fields,
+      updatedAt: DB.nowIso()
+    });
+    return T.put('categories', next).then(function () {
+      return list.map(function (c) { return c.id === 'vision' ? next : c; });
     });
   }
 
@@ -427,45 +801,23 @@
     return 'IT';
   }
 
-  function pad4(n) {
-    return String(n).padStart(4, '0');
-  }
-
-  function counterKey(prefix) {
-    return 'codeCounter:' + prefix;
-  }
-
   /**
    * 生成 count 个连续的新编码。
    * 用计数器而不是"取最大值+1"，即使物品被删掉也不会重号（PRD 要求编码不复用）。
    * 计数器在同一个事务里读改写，批量生成不会重号。
    */
+  /**
+   * 生成 count 个连续的新编码 —— **委托给数据层**（第二十六轮）。
+   *
+   * 为什么不在这一层算：离线版单机算号没问题，但飞书共享版是多人同时在用，
+   * 各自在本机算号必然会撞（两个人都算出 MC-0007）—— 那正是"编号被占用"的根源，
+   * 用户看到的是"保存失败，请重新操作一次"外加一次全量重拉。
+   * 发号改由数据层决定：离线版本地事务算，飞书版**向服务端领一段号**
+   * （服务端所有写都过同一条串行队列，天生不会撞）。界面代码两边同一份，
+   * 差异收在 DB.nextCodes 里。
+   */
   function nextCodes(category, count) {
-    var prefix = prefixOf(category);
-    var n = Math.max(1, Number(count) || 1);
-    var key = counterKey(prefix);
-    // 计数器与物品表放在同一个事务里，批量生成不会重号
-    return DB.runTx(['settings', 'items'], 'readwrite', function (T) {
-      return T.get('settings', key).then(function (row) {
-        if (row && typeof row.value === 'number') return row.value;
-        // 首次使用：扫描已有物品，从最大流水号继续，兼容导入的旧数据
-        return T.getAll('items').then(function (items) {
-          var max = 0;
-          items.forEach(function (it) {
-            if (!it.code || it.code.indexOf(prefix + '-') !== 0) return;
-            var parsed = parseInt(it.code.slice(prefix.length + 1), 10);
-            if (!isNaN(parsed) && parsed > max) max = parsed;
-          });
-          return max;
-        });
-      }).then(function (base) {
-        var codes = [];
-        for (var i = 1; i <= n; i += 1) codes.push(prefix + '-' + pad4(base + i));
-        return T.put('settings', { key: key, value: base + n, updatedAt: DB.nowIso() }).then(function () {
-          return codes;
-        });
-      });
-    });
+    return DB.nextCodes(prefixOf(category), count);
   }
 
   /** 二维码里放的文本，第二版手机端按同样格式解析 */
@@ -689,10 +1041,25 @@
     STATUS_NAMES: STATUS_NAMES,
     INVOICE_STATUS_NAMES: INVOICE_STATUS_NAMES,
     TROOPS: TROOPS,
+    TROOP_LEGACY: TROOP_LEGACY,
+    TROOP_OPTIONS: TROOP_OPTIONS,
+    troopFilterList: troopFilterList,
     TROOP_FALLBACK: TROOP_FALLBACK,
     normalizeTroop: normalizeTroop,
     troopOf: troopOf,
+    troopChoices: troopChoices,
+    budgetTroops: budgetTroops,
     invoiceLabel: invoiceLabel,
+    txnLabel: txnLabel,
+    nameKey: nameKey,
+    sameNameItems: sameNameItems,
+    parseOptionalPrice: parseOptionalPrice,
+    parseOptionalDate: parseOptionalDate,
+    searchAll: searchAll,
+    newBatchId: newBatchId,
+    ownerKey: ownerKey,
+    draftCartKey: draftCartKey,
+    purchaseLink: purchaseLink,
     APPROVALS: APPROVALS,
     APPROVAL_NAMES: APPROVAL_NAMES,
     approvalOf: approvalOf,
@@ -700,6 +1067,7 @@
     isPendingApproval: isPendingApproval,
     DELETE_LOG_KEY: DELETE_LOG_KEY,
     DELETE_LOG_MAX: DELETE_LOG_MAX,
+    DELETE_LOG_MAX_CHARS: DELETE_LOG_MAX_CHARS,
     DELETE_LABELS: DELETE_LABELS,
     currentActor: currentActor,
     buildDeletionEntry: buildDeletionEntry,

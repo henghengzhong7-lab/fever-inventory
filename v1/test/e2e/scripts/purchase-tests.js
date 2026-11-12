@@ -87,26 +87,41 @@
       E2E.clickSelector('[data-act="new-purchase"]');
       var mask = await modal();
       await E2E.waitUntil('表单就绪', function () { return mask.querySelector('[name="name"]'); });
+
+      // 第十四周：步兵细分为三类。下拉框里应出现三个新兵种，
+      // 且不再出现旧的「步兵」（它只留给历史数据，见 rules.js 的 TROOP_LEGACY）
+      var troopVals = Array.prototype.map.call(mask.querySelector('[name="troop"]').options,
+        function (o) { return o.value; });
+      ['轮腿步兵', '过洞步兵', '可折叠步兵'].forEach(function (t) {
+        E2E.ok(troopVals.indexOf(t) !== -1, '兵种下拉里应有「' + t + '」，实际只有：' + troopVals.join('、'));
+      });
+      E2E.ok(troopVals.indexOf('步兵') === -1, '兵种下拉里不该再有旧的「步兵」');
+
       fillIn(mask, 'categoryId', 'vision');
-      pickIn(mask, 'troop', '步兵');
+      pickIn(mask, 'troop', '轮腿步兵');
       fillIn(mask, 'name', '工业相机');
       fillIn(mask, 'spec', '500万像素');
       fillIn(mask, 'quantity', '2');
       fillIn(mask, 'budget', '6000');
       fillIn(mask, 'applicant', '张三');
       fillIn(mask, 'purpose', '色块识别');
+      // 购买链接（第十四周）：填的时候不写协议，保存时应该自动补上
+      fillIn(mask, 'link', 'item.example.com/cam-1');
       E2E.clickSelector('[data-ok]', mask);
       await waitModalGone();
       await E2E.waitUntil('列表出现新申请', function () { return body().indexOf('工业相机') !== -1; });
       var reqs = await DB.getAll('purchaseRequests');
       E2E.ok(reqs.length === 1, '应有 1 条申请，实际 ' + reqs.length);
       E2E.ok(reqs[0].status === 'pending', '状态应为待购买，实际 ' + reqs[0].status);
-      E2E.ok(reqs[0].troop === '步兵', '兵种应保存，实际 ' + reqs[0].troop);
+      E2E.ok(reqs[0].troop === '轮腿步兵', '兵种应保存，实际 ' + reqs[0].troop);
       E2E.ok(reqs[0].applicant === '张三', '申请人应保存');
+      E2E.ok(reqs[0].link === 'https://item.example.com/cam-1',
+        '购买链接应存下来并自动补 https，实际 ' + reqs[0].link);
       E2E.ok(reqs[0].approval === 'pending', '新申请应默认待审批，实际 ' + reqs[0].approval);
       E2E.ok(body().indexOf('待购买') !== -1, '列表应显示「待购买」');
       E2E.ok(body().indexOf('待审批') !== -1, '列表应显示「待审批」');
-      E2E.ok(body().indexOf('步兵') !== -1, '列表应显示兵种');
+      E2E.ok(body().indexOf('轮腿步兵') !== -1, '列表应显示兵种');
+      E2E.ok(!!document.querySelector('[data-purchase-link]'), '列表里应能点开购买链接');
       var items = await DB.getAll('items');
       E2E.ok(items.length === 0, '还没到货，不应生成物品');
     });
@@ -125,7 +140,7 @@
       E2E.ok(text('#toast-root').indexOf('兵种') !== -1, '应提示要选兵种');
 
       // 2) 选了兵种，但名称空着
-      pickIn(mask, 'troop', '步兵');
+      pickIn(mask, 'troop', '轮腿步兵');
       fillIn(mask, 'name', '');
       E2E.clickSelector('[data-ok]', mask);
       await E2E.wait(150);
@@ -230,7 +245,7 @@
       E2E.clickSelector('[data-approve]');
       var mask = await modal();
       await E2E.waitUntil('确认框就绪', function () { return mask.querySelector('[data-act="yes"]'); });
-      E2E.ok(mask.textContent.indexOf('步兵') !== -1, '确认框里应说清会占用哪个兵种的预算');
+      E2E.ok(mask.textContent.indexOf('轮腿步兵') !== -1, '确认框里应说清会占用哪个兵种的预算');
       E2E.clickSelector('[data-act="yes"]', mask);
       await waitModalGone();
 
@@ -268,6 +283,10 @@
       E2E.ok(mask.querySelector('#arrive-pdf-drop'), '应有发票 PDF 的拖拽 / 点选入口');
       await E2E.waitUntil('到货表单就绪', function () { return mask.querySelector('[name="quantity"]'); });
       E2E.ok(mask.querySelector('[name="quantity"]').value === '2', '到货数量应默认等于申请数量');
+      // 第十四周：这一栏改叫「到货日期」（字段名仍是 invoiceDate，不动历史数据）
+      var dateLabel = mask.querySelector('[name="invoiceDate"]').closest('.field').querySelector('label');
+      E2E.ok(dateLabel && dateLabel.textContent.indexOf('到货日期') !== -1,
+        '日期栏应显示「到货日期」，实际：' + (dateLabel ? dateLabel.textContent.trim() : '(找不到)'));
       fillIn(mask, 'location', '器材柜A');
       fillIn(mask, 'amount', '5880');
       fillIn(mask, 'invoiceDate', '2026-09-20');
@@ -558,7 +577,7 @@
 
     /* ---------- 兵种预算（功能 3） ---------- */
 
-    await E2E.record('兵种预算：已用只算已同意的申请', async function () {
+    await E2E.record('兵种预算：待审批不占预算、驳回的一分不算（这里没有直接入库的钱）', async function () {
       await E2E.resetDb();
       await global.FEVER.Rules.initCategories();
       var now = DB.nowIso();
@@ -630,9 +649,11 @@
       E2E.ok(csv.text.indexOf('【已消费明细】') !== -1 && csv.text.indexOf('【未消费预算】') !== -1,
         '应有已消费明细与未消费预算两段');
       // 当前数据：步兵已同意 9000（额度 20000）、无人机只有待审批 1000（额度 5000）
-      E2E.ok(csv.text.indexOf('步兵,20000.00,9000.00,11000.00') !== -1, '总表里步兵一行应为 已用9000/剩11000');
+      // 第二十五轮：已用拆成「已同意申请 + 直接入库」两列，所以步兵行多了两个 9000.00 / 0.00
+      E2E.ok(csv.text.indexOf('步兵,20000.00,9000.00,9000.00,0.00,11000.00') !== -1,
+        '总表里步兵一行应为 已用9000(申请9000+入库0)/剩11000');
       E2E.ok(csv.text.indexOf('已消费') !== -1, '步兵应标记已消费');
-      E2E.ok(csv.text.indexOf('无人机,5000.00,0.00,5000.00') !== -1, '总表里无人机一行应为 已用0/剩5000');
+      E2E.ok(csv.text.indexOf('无人机,5000.00,0.00,0.00,0.00,5000.00') !== -1, '总表里无人机一行应为 已用0/剩5000');
       E2E.ok(csv.text.indexOf('已同意件') !== -1, '已消费明细里应有那条已同意的申请');
       E2E.ok(csv.text.indexOf('待审批件') === -1, '待审批的没花钱，不该出现在已消费明细里');
       var unusedSection = csv.text.split('【未消费预算】')[1];
@@ -788,6 +809,634 @@
       E2E.ok(!mask.querySelector('[data-act="clear-delete-log"]'), '界面不提供"清空删除记录"');
       E2E.clickSelector('.modal-close', mask);
       await waitModalGone();
+    });
+
+    await E2E.record('采购申请筛选：按申请人 / 兵种 / 关键字筛，能一键清空', async function () {
+      // 造两条申请人不同的申请，用来验证"只想看某个人申请的采购"
+      var now = DB.nowIso();
+      await DB.add('purchaseRequests', {
+        categoryId: 'mechanical', troop: '轮腿步兵', name: '筛选件甲', spec: '', quantity: 1, budget: '10',
+        purpose: '', applicant: '筛选甲', status: 'pending', approval: 'pending', createdAt: now, updatedAt: now
+      });
+      await DB.add('purchaseRequests', {
+        categoryId: 'mechanical', troop: '过洞步兵', name: '筛选件乙', spec: '', quantity: 1, budget: '10',
+        purpose: '', applicant: '筛选乙', status: 'pending', approval: 'pending', createdAt: now, updatedAt: now
+      });
+
+      await gotoTab('purchases');
+      await E2E.waitUntil('筛选栏就绪', function () { return document.querySelector('[name="f-applicant"]'); });
+      var root = document.querySelector('#view-root');
+
+      function listText() {
+        var node = document.querySelector('#purchase-table');
+        return node ? node.textContent.replace(/\s+/g, ' ') : '';
+      }
+
+      E2E.ok(listText().indexOf('筛选件甲') !== -1 && listText().indexOf('筛选件乙') !== -1,
+        '默认两条都该显示，实际：' + listText().slice(0, 120));
+
+      // 1) 只看某人申请的 —— 用户明确要的能力
+      pickIn(root, 'f-applicant', '筛选甲');
+      E2E.ok(listText().indexOf('筛选件甲') !== -1, '选了「筛选甲」后那条还应在');
+      E2E.ok(listText().indexOf('筛选件乙') === -1, '别人申请的那条应被过滤掉');
+
+      // 2) 兵种条件（每列都有条件，不是只有申请人一个）
+      pickIn(root, 'f-applicant', '');
+      pickIn(root, 'f-troop', '过洞步兵');
+      E2E.ok(listText().indexOf('筛选件乙') !== -1 && listText().indexOf('筛选件甲') === -1,
+        '兵种条件应生效，实际：' + listText().slice(0, 120));
+
+      // 3) 关键字条件
+      pickIn(root, 'f-troop', '');
+      fillIn(root, 'f-keyword', '筛选件甲');
+      E2E.ok(listText().indexOf('筛选件甲') !== -1 && listText().indexOf('筛选件乙') === -1,
+        '关键字条件应生效，实际：' + listText().slice(0, 120));
+      var counter = document.querySelector('#purchase-count');
+      E2E.ok(counter && counter.textContent.indexOf('显示') !== -1, '应显示「显示 x / y 条」');
+
+      // 4) 清空条件：两条都回来
+      E2E.clickSelector('[data-act="reset-filter"]');
+      E2E.ok(listText().indexOf('筛选件甲') !== -1 && listText().indexOf('筛选件乙') !== -1,
+        '清空条件后两条都应回来，实际：' + listText().slice(0, 120));
+      E2E.ok(document.querySelector('[name="f-keyword"]').value === '', '清空条件应把输入框也清掉');
+    });
+
+    await E2E.record('到货时没传发票的，之后能在列表里补传 PDF（补传不动库存、不写流水）', async function () {
+      // 造一条"到货了但当时没拿到发票"的记录：发票行在、附件为空
+      var now = DB.nowIso();
+      var reqId = await DB.add('purchaseRequests', {
+        categoryId: 'mechanical', troop: '哨兵', name: '后补发票件', spec: '', quantity: 1, budget: '58',
+        purpose: '', applicant: '王五', status: 'arrived', approval: 'approved',
+        arrivedQty: 1, createdAt: now, updatedAt: now
+      });
+      var invId = await DB.add('invoices', {
+        purchaseRequestId: reqId, invoiceNo: '', amount: 58, supplier: '',
+        invoiceDate: '2026-09-20', createdAt: now
+      });
+
+      await gotoTab('purchases');
+      await E2E.waitUntil('出现补传发票入口', function () {
+        return document.querySelector('[data-upload-invoice="' + invId + '"]');
+      });
+      var btn = document.querySelector('[data-upload-invoice="' + invId + '"]');
+      E2E.ok(btn.textContent.indexOf('补传发票') !== -1, '没附件时应显示「补传发票」，实际：' + btn.textContent);
+
+      var txnBefore = (await DB.getAll('transactions')).length;
+      var itemBefore = (await DB.getAll('items')).length;
+
+      E2E.click(btn);
+      var mask = await modal();
+      await E2E.waitUntil('补传弹窗就绪', function () { return mask.querySelector('#upload-pdf-input'); });
+
+      // 没选文件就点上传，应该被拦住（不能静默什么都不做就关窗）
+      E2E.clickSelector('[data-ok]', mask);
+      await E2E.wait(120);
+      E2E.ok(document.querySelector('.modal-mask'), '没选文件时弹窗不该关闭');
+      E2E.ok(text('#toast-root').indexOf('先选') !== -1, '应提示先选文件');
+
+      // 塞一份 PDF（无头浏览器点不出系统文件选择器，和到货用例同一手法）
+      var input = mask.querySelector('#upload-pdf-input');
+      var bytes = Uint8Array.from(global.atob(MIN_PDF_B64), function (ch) { return ch.charCodeAt(0); });
+      var file = new File([bytes], '补传发票.pdf', { type: 'application/pdf' });
+      var dt = new DataTransfer();
+      dt.items.add(file);
+      input.files = dt.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      await E2E.waitUntil('PDF 已被读取', function () {
+        var msg = mask.querySelector('#upload-pdf-msg');
+        return msg && msg.textContent.indexOf('已选') !== -1;
+      });
+      E2E.clickSelector('[data-ok]', mask);
+      await waitModalGone();
+
+      await E2E.waitUntilAsync('发票上已经有了附件', async function () {
+        var inv = await DB.get('invoices', invId);
+        return !!(inv && (inv.fileRef || inv.fileData));
+      });
+      var inv = await DB.get('invoices', invId);
+      E2E.ok(inv.fileName === '补传发票.pdf', '附件名应记下来，实际 ' + inv.fileName);
+      E2E.ok(inv.amount === 58, '补传只补票据，金额不该被改，实际 ' + inv.amount);
+      E2E.ok((await DB.getAll('transactions')).length === txnBefore, '补传不该写流水');
+      E2E.ok((await DB.getAll('items')).length === itemBefore, '补传不该新增物品');
+
+      // 补传之后同一个位置变成「更换 PDF」
+      await E2E.waitUntil('按钮变成更换', function () {
+        var b = document.querySelector('[data-upload-invoice="' + invId + '"]');
+        return b && b.textContent.indexOf('更换') !== -1;
+      });
+    });
+
+    await E2E.record('清单点物品名：没到货的进申请详情，到货的落到这一批物品上', async function () {
+      var now = DB.nowIso();
+      var pendId = await DB.add('purchaseRequests', {
+        categoryId: 'mechanical', troop: '哨兵', name: '没到货的件', spec: '', quantity: 1,
+        budget: '10', purpose: '', applicant: '甲', status: 'pending', approval: 'approved',
+        createdAt: now, updatedAt: now
+      });
+      await gotoTab('purchases');
+      await E2E.waitUntil('出现可点的物品名', function () {
+        return document.querySelector('[data-open-purchase="' + pendId + '"]');
+      });
+      E2E.clickSelector('[data-open-purchase="' + pendId + '"]');
+      var mask = await modal();
+      await E2E.waitUntil('打开的是申请详情', function () {
+        return mask.textContent.indexOf('采购申请 #' + pendId) !== -1;
+      });
+      E2E.clickSelector('.modal-close', mask);
+      await waitModalGone();
+
+      // 自己造一条"到货并生成多个身份"的申请：不依赖前面用例留下的数据，
+      // 那批数据会被别的用例删掉，断言就会变成随机通过/失败
+      var Ops = global.FEVER.Ops;
+      var batchReqId = await Ops.createRequest({
+        categoryId: 'vision', troop: '哨兵', name: '批量到货的相机', quantity: 2,
+        budget: '1000', applicant: '乙'
+      });
+      var batchReq = await DB.get('purchaseRequests', batchReqId);
+      batchReq.approval = 'approved';
+      await DB.put('purchaseRequests', batchReq);
+      var batchArrive = await Ops.arrive({
+        requestId: batchReqId, quantity: 2, amount: 1000, operator: '测试', identityMode: 'single'
+      });
+      E2E.ok(batchArrive.codes.length === 2, '这条申请应生成 2 个身份，实际 ' + batchArrive.codes.length);
+      await App.refresh();
+
+      await gotoTab('purchases');
+      await E2E.waitUntil('出现可点的物品名（已到货）', function () {
+        return document.querySelector('[data-open-purchase="' + batchReqId + '"]');
+      });
+      E2E.clickSelector('[data-open-purchase="' + batchReqId + '"]');
+      await E2E.waitUntil('落到大类清单', function () {
+        return document.querySelector('#view-root').getAttribute('data-page') === 'category';
+      });
+      await E2E.waitUntil('出现「只看一批」提示', function () { return document.querySelector('[data-clear-req]'); });
+      E2E.ok(text('#view-root').indexOf('#' + batchReqId) !== -1, '要写清只看哪一条申请生成的那批');
+      var tableText = text('#cat-table');
+      batchArrive.codes.forEach(function (code) {
+        E2E.ok(tableText.indexOf(code) !== -1, '这一批的 ' + code + ' 应在清单里');
+      });
+      E2E.ok(text('#cat-count').indexOf('2 /') !== -1,
+        '清单条数应只剩这一批的 2 件，实际：' + text('#cat-count'));
+
+      E2E.clickSelector('[data-clear-req]');
+      await E2E.waitUntil('提示消失、恢复整类', function () { return !document.querySelector('[data-clear-req]'); });
+      var allVision = (await DB.getAll('items')).filter(function (i) { return i.categoryId === 'vision'; }).length;
+      await E2E.waitUntil('条数恢复到整类', function () {
+        return text('#cat-count').indexOf(allVision + ' / ' + allVision) !== -1;
+      });
+      E2E.ok(text('#cat-count').indexOf(allVision + ' / ' + allVision) !== -1,
+        '清掉「只看一批」后应显示整类的 ' + allVision + ' 件，实际：' + text('#cat-count'));
+    });
+
+    await E2E.record('兵种预算点「申请数」→ 跳到采购申请页并预置好筛选', async function () {
+      await gotoTab('budgets');
+      await E2E.waitUntil('预算页出现可点的申请数', function () { return document.querySelector('[data-budget-drill]'); });
+      var btn = document.querySelector('[data-budget-drill]');
+      var troop = btn.getAttribute('data-budget-drill');
+      E2E.ok(btn.textContent.indexOf('次') !== -1, '申请数应该长得像一个能点的东西，实际：' + btn.textContent);
+      E2E.click(btn);
+
+      await E2E.waitUntil('切到采购申请页', function () {
+        return document.querySelector('#view-root').getAttribute('data-page') === 'purchases';
+      });
+      await E2E.waitUntil('筛选栏就绪', function () { return document.querySelector('[name="f-troop"]'); });
+      var troopSel = document.querySelector('[name="f-troop"]');
+      E2E.ok(troopSel.value === troop, '兵种条件应预置成「' + troop + '」，实际：' + troopSel.value +
+        '（地址栏：' + global.location.hash + '，计数：' + text('#purchase-count') + '）');
+
+      // 预置条件要真的生效：列表条数应等于库里该兵种的申请数
+      var None = '__none__';
+      var expect = (await DB.getAll('purchaseRequests')).filter(function (r) {
+        var t = global.FEVER.Rules.troopOf(r) || None;
+        return troop === None ? !global.FEVER.Rules.troopOf(r) : t === troop;
+      }).length;
+      await E2E.waitUntil('条数收敛到该兵种', function () {
+        return text('#purchase-count').indexOf('显示 ' + expect + ' /') !== -1;
+      });
+      E2E.ok(text('#purchase-count').indexOf('显示 ' + expect + ' /') !== -1,
+        '应显示该兵种的 ' + expect + ' 条，实际：' + text('#purchase-count'));
+    });
+
+    await E2E.record('打包提交：先存起来 → 待提交清单 → 一次提交成一批', async function () {
+      var Ops = global.FEVER.Ops;
+      var Rules = global.FEVER.Rules;
+      var key = Rules.ownerKey(DB.currentUser());
+
+      // 1) 走界面存一条：新建采购申请 → 先存起来
+      await gotoTab('home');
+      E2E.clickSelector('[data-act="new-purchase"]');
+      var mask = await modal();
+      await E2E.waitUntil('表单就绪', function () { return mask.querySelector('[name="name"]'); });
+      E2E.ok(mask.querySelector('[data-draft]'), '新建采购申请里应有「先存起来」');
+      pickIn(mask, 'troop', '雷达');
+      fillIn(mask, 'name', '打包甲');
+      fillIn(mask, 'applicant', '王五');
+      fillIn(mask, 'quantity', '1');
+      fillIn(mask, 'budget', '300');
+      E2E.clickSelector('[data-draft]', mask);
+      await waitModalGone();
+
+      var drafts = await Ops.loadDraftCart({ key: key });
+      E2E.ok(drafts.length === 1, '界面上「先存起来」应存进清单，实际 ' + drafts.length);
+
+      // 2) 再攒两条（直接走数据层，省去重复填表）
+      await Ops.addToDraftCart({ key: key, categoryId: 'mechanical', troop: '雷达', name: '打包乙',
+        quantity: 1, budget: '200', applicant: '王五' });
+      await Ops.addToDraftCart({ key: key, categoryId: 'mechanical', troop: '雷达', name: '打包丙',
+        quantity: 1, budget: '100', applicant: '王五' });
+      await App.refresh();
+
+      // 3) 待提交清单页
+      await gotoTab('cart');
+      await E2E.waitUntil('清单渲染出来', function () { return document.querySelector('[data-cart-pick]'); });
+      E2E.ok(document.querySelectorAll('[data-cart-pick]').length === 3, '应有 3 条草稿');
+      E2E.ok(text('#cart-count').indexOf('共 3 条') !== -1, '应显示条数，实际：' + text('#cart-count'));
+      E2E.ok(document.querySelector('#nav-badge-cart'), '导航上应有待提交的角标位');
+
+      // 4) 打包提交
+      E2E.clickSelector('[data-act="submit-cart"]');
+      var submitMask = await modal();
+      await E2E.waitUntil('打包弹窗就绪', function () { return submitMask.querySelector('[name="applicant"]'); });
+      E2E.ok(submitMask.textContent.indexOf('只会收到一条') !== -1, '要说明管理员只收到一条提醒');
+      fillIn(submitMask, 'applicant', '王五');
+      E2E.clickSelector('[data-ok]', submitMask);
+      await waitModalGone();
+
+      var reqs = await DB.getAll('purchaseRequests');
+      var batchReqs = reqs.filter(function (r) { return r.name.indexOf('打包') === 0; });
+      E2E.ok(batchReqs.length === 3, '应生成 3 条申请，实际 ' + batchReqs.length);
+      var batchId = batchReqs[0].batchId;
+      E2E.ok(batchId && batchId.indexOf('B-') === 0, '应带批次号，实际 ' + batchId);
+      E2E.ok(batchReqs.every(function (r) { return r.batchId === batchId; }), '这一批共享同一个批次号');
+      E2E.ok(batchReqs.every(function (r) { return r.approval === 'pending'; }), '整批都是待审批');
+      E2E.ok((await Ops.loadDraftCart({ key: key })).length === 0, '提交后清单应清空');
+      E2E.ok((await DB.getAll('transactions')).length >= 0, '打包提交不该产生流水');
+
+      // 5) 批次页：整批同意 + 批量到货 + 按批打包发票 + 缺票提醒
+      await gotoTab('purchases');
+      await E2E.waitUntil('清单里出现整批入口', function () {
+        return document.querySelector('[data-goto-batch="' + batchId + '"]');
+      });
+      E2E.clickSelector('[data-goto-batch="' + batchId + '"]');
+      await E2E.waitUntil('进到批次页', function () {
+        var root = document.querySelector('#view-root');
+        return root.getAttribute('data-page') === 'batch' && text('#view-root').indexOf(batchId) !== -1;
+      });
+      E2E.ok(text('#view-root').indexOf('打包甲') !== -1 && text('#view-root').indexOf('打包丙') !== -1,
+        '批次页应列出这一批的三条');
+
+      // 整批同意
+      E2E.ok(document.querySelector('[data-batch-approve]'), '应有「整批同意」');
+      E2E.clickSelector('[data-batch-approve]');
+      var approveMask = await modal();
+      await E2E.waitUntil('整批同意确认框', function () { return approveMask.querySelector('[data-act="yes"]'); });
+      E2E.clickSelector('[data-act="yes"]', approveMask);
+      await waitModalGone();
+      await E2E.waitUntilAsync('三条都变成已同意', async function () {
+        var rows = (await DB.getAll('purchaseRequests')).filter(function (r) { return r.batchId === batchId; });
+        return rows.length === 3 && rows.every(function (r) { return r.approval === 'approved'; });
+      });
+
+      // 批量确认到货：逐条走，第二条用「沿用上一张发票 PDF」
+      await E2E.waitUntil('出现批量到货入口', function () { return document.querySelector('[data-batch-arrive]'); });
+      E2E.clickSelector('[data-batch-arrive]');
+
+      // 第一条：正常填 + 传 PDF
+      var arriveMask = await modal();
+      await E2E.waitUntil('第一条到货表单', function () { return arriveMask.querySelector('#arrive-pdf-input'); });
+      E2E.ok(!arriveMask.querySelector('[data-use-last]'), '第一条没有"上一张"可用');
+      fillIn(arriveMask, 'location', '批量柜A');
+      fillIn(arriveMask, 'amount', '300');
+      fillIn(arriveMask, 'operator', '李四');
+      await feedPdf(arriveMask, MIN_PDF_B64);
+      E2E.clickSelector('[data-ok]', arriveMask);
+      await waitModalGone();
+
+      // 第二条：点「沿用上一张发票 PDF」，不用再选文件
+      var second = await modal();
+      await E2E.waitUntil('第二条到货表单', function () { return second.querySelector('[data-use-last]'); });
+      E2E.ok(second.textContent.indexOf('沿用上一张发票 PDF') !== -1, '第二条应能沿用上一张');
+      E2E.clickSelector('[data-use-last]', second);
+      await E2E.waitUntil('上一张已被带入', function () {
+        var msg = second.querySelector('#arrive-pdf-msg');
+        return msg && msg.textContent.indexOf('已选') !== -1;
+      });
+      fillIn(second, 'location', '批量柜B');
+      fillIn(second, 'amount', '200');
+      fillIn(second, 'operator', '李四');
+      E2E.clickSelector('[data-ok]', second);
+      await waitModalGone();
+
+      // 第三条：故意不传发票（用来验证"缺发票"和提醒）
+      var third = await modal();
+      await E2E.waitUntil('第三条到货表单', function () { return third.querySelector('#arrive-pdf-input'); });
+      fillIn(third, 'location', '批量柜C');
+      fillIn(third, 'amount', '100');
+      fillIn(third, 'operator', '李四');
+      E2E.clickSelector('[data-ok]', third);
+      await waitModalGone();
+
+      await E2E.waitUntilAsync('三条都到货了', async function () {
+        var rows = (await DB.getAll('purchaseRequests')).filter(function (r) { return r.batchId === batchId; });
+        return rows.length === 3 && rows.every(function (r) { return r.status === 'arrived'; });
+      });
+      E2E.ok((await DB.getAll('items')).filter(function (i) {
+        return String(i.purchaseRequestId) === String(batchReqs[0].id);
+      }).length > 0, '到货应生成物品');
+
+      // 回到批次页看动作区
+      await App.refresh();
+      await E2E.waitUntil('批次页出现缺票提示', function () { return document.querySelector('[data-batch-remind]'); });
+      E2E.ok(text('#view-root').indexOf('1 条还缺发票') !== -1,
+        '应指出缺几张发票，实际：' + text('#view-root').slice(0, 120));
+      E2E.ok(document.querySelector('[data-batch-invoices]'), '应有按批次打包下载发票的入口');
+      E2E.ok(document.querySelector('[data-batch-invoices]').textContent.indexOf('2 张') !== -1,
+        '打包张数应是 2（第三条没传），实际：' + document.querySelector('[data-batch-invoices]').textContent);
+
+      // 打包下载：拦下真正的下载，验一下 zip
+      var captured = null;
+      var realBytes = global.FEVER.UI.downloadBytes;
+      global.FEVER.UI.downloadBytes = function (name, data, mime) { captured = { name: name, data: data, mime: mime }; };
+      try {
+        E2E.clickSelector('[data-batch-invoices]');
+        await E2E.waitUntil('zip 已生成', function () { return !!captured; }, 12000);
+      } finally {
+        global.FEVER.UI.downloadBytes = realBytes;
+      }
+      E2E.ok(/\.zip$/.test(captured.name), '应导出 zip，实际 ' + captured.name);
+      var bytes = captured.data instanceof Uint8Array ? captured.data : new Uint8Array(captured.data);
+      E2E.ok(bytes.length > 100, 'zip 里应该真有内容');
+      E2E.ok(bytes[0] === 0x50 && bytes[1] === 0x4b, '应是合法的 zip 签名（PK）');
+
+      // 提醒补齐发票：离线版发不出去，界面必须明说，而不是假装提醒过了
+      E2E.clickSelector('[data-batch-remind]');
+      await E2E.waitUntil('明确告知发不出去', function () {
+        return text('#toast-root').indexOf('离线版') !== -1;
+      });
+      E2E.ok(!document.querySelector('.modal-mask'), '失败时不该弹一个"提醒结果"来假装成功');
+    });
+
+    await E2E.record('采购申请列表上就能直接下载整批发票（不用先进批次页）', async function () {
+      await gotoTab('purchases');
+      await E2E.waitUntil('出现「整批发票」按钮', function () {
+        return document.querySelector('[data-batch-invoice-ids]');
+      });
+      var btn = document.querySelector('[data-batch-invoice-ids]');
+      E2E.ok(btn.textContent.indexOf('整批发票') !== -1, '按钮要说清是"整批发票"，实际：' + btn.textContent);
+      var expectIds = btn.getAttribute('data-batch-invoice-ids').split(',').filter(Boolean);
+      E2E.ok(expectIds.length >= 1, '按钮上应带着要下哪几张');
+
+      var captured = null;
+      var realBytes = global.FEVER.UI.downloadBytes;
+      global.FEVER.UI.downloadBytes = function (name, data, mime) { captured = { name: name, data: data }; };
+      try {
+        E2E.click(btn);
+        await E2E.waitUntil('zip 已生成', function () { return !!captured; }, 12000);
+      } finally {
+        global.FEVER.UI.downloadBytes = realBytes;
+      }
+      E2E.ok(!!captured && /\.zip$/.test(captured.name), '应导出 zip，实际 ' + (captured && captured.name));
+      var bytes = captured.data instanceof Uint8Array ? captured.data : new Uint8Array(captured.data);
+      E2E.ok(bytes.length > 100, 'zip 里应该真有内容');
+      E2E.ok(bytes[0] === 0x50 && bytes[1] === 0x4b, '应是合法的 zip 签名（PK）');
+    });
+
+    await E2E.record('批次页能一键打这批的标签，标签页也能按批次筛', async function () {
+      var reqs = await DB.getAll('purchaseRequests');
+      var batchReqs = reqs.filter(function (r) { return r.name.indexOf('打包') === 0; });
+      var batchId = batchReqs[0].batchId;
+      var items = await DB.getAll('items');
+      var codes = items.filter(function (i) {
+        return batchReqs.some(function (r) { return String(r.id) === String(i.purchaseRequestId); });
+      }).map(function (i) { return i.code; });
+      E2E.ok(codes.length > 0, '这一批应已到货生成物品');
+
+      global.FEVER.App.goto('batch', { id: batchId });
+      await E2E.waitUntil('进到批次页', function () {
+        return document.querySelector('#view-root').getAttribute('data-page') === 'batch';
+      });
+      await E2E.waitUntil('出现「打印这批的标签」', function () { return document.querySelector('[data-batch-labels]'); });
+      E2E.clickSelector('[data-batch-labels]');
+
+      await E2E.waitUntil('落到标签页', function () {
+        return document.querySelector('#view-root').getAttribute('data-page') === 'labels';
+      });
+      await E2E.waitUntil('只列这一批到货生成的标签', function () {
+        var cards = document.querySelectorAll('#label-sheet .label-card');
+        return cards.length > 0 && Array.prototype.every.call(cards, function (c) {
+          return codes.indexOf(c.querySelector('.label-code').textContent.trim()) !== -1;
+        });
+      });
+      E2E.ok(text('#view-root').indexOf('批次 ' + batchId) !== -1,
+        '页头应说明这是哪一批，实际：' + text('#view-root').slice(0, 100));
+      E2E.ok(global.location.hash.indexOf('/b/') !== -1,
+        '地址栏应记住这个批次（刷新或把链接发给队友还能回到同一批），实际：' + global.location.hash);
+
+      // 标签页的挑选弹窗里也能按批次筛
+      E2E.clickSelector('[data-act="pick-labels"]');
+      var mask = await modal();
+      await E2E.waitUntil('挑选弹窗里有批次下拉', function () { return mask.querySelector('[name="l-batch"]'); });
+      var batchSel = mask.querySelector('[name="l-batch"]');
+      var opts = Array.prototype.map.call(batchSel.options, function (o) { return o.value; });
+      E2E.ok(opts.indexOf(batchId) !== -1, '批次下拉里应有这一批，实际：' + opts.join('|'));
+      E2E.setSelect(batchSel, batchId);
+      await E2E.waitUntil('按批次筛出这一批', function () {
+        var rows = mask.querySelectorAll('input[name="label-pick"]');
+        return rows.length > 0 && Array.prototype.every.call(rows, function (b) {
+          return codes.indexOf(b.value) !== -1;
+        });
+      });
+      // 关键断言（第十九轮补）：**确认之后**页面上必须只剩这一批。
+      // 以前只断言"列表变窄了"，漏掉了"默认全选的状态没跟着筛选变"这个坑 ——
+      // 于是用户选完批次、点确认，打印出来的却是全部标签。
+      var printed = 0;
+      var realPrint = global.print;
+      global.print = function () { printed += 1; };
+      try {
+        E2E.clickSelector('[data-ok]', mask);
+        await E2E.waitUntil('弹窗关闭', function () { return !document.querySelector('.modal-mask'); });
+        await E2E.waitUntil('标签页只剩这一批', function () {
+          var cards = document.querySelectorAll('#label-sheet .label-card');
+          return cards.length === codes.length && Array.prototype.every.call(cards, function (c) {
+            return codes.indexOf(c.querySelector('.label-code').textContent.trim()) !== -1;
+          });
+        });
+        E2E.ok(printed > 0, '确认后应唤起打印');
+        var sheetText = text('#label-sheet');
+        E2E.ok(/共 \d+ 张标签/.test(sheetText), '纸上应写明这次打几张，实际：' + sheetText.slice(0, 80));
+      } finally {
+        global.print = realPrint;
+      }
+    });
+
+    await E2E.record('顶栏「下载发票」点开就是那个勾选框（与采购申请页同一个功能）', async function () {
+      await gotoTab('home');
+      E2E.ok(document.querySelector('#main-nav [data-act="open-invoices"]'),
+        '导航上应有「下载发票」入口（与物资总览同一排、位置靠前）');
+      var navOrder = Array.prototype.map.call(
+        document.querySelectorAll('#main-nav .nav-item'),
+        function (b) { return b.textContent.replace(/[0-9]+$/, '').trim(); }
+      );
+      E2E.ok(navOrder.indexOf('下载发票') > navOrder.indexOf('物资总览') &&
+        navOrder.indexOf('下载发票') < navOrder.indexOf('打印标签'),
+        '「下载发票」应在物资总览之后、靠前位置，实际顺序：' + navOrder.join('、'));
+
+      E2E.clickSelector('#main-nav [data-act="open-invoices"]');
+      var mask = await modal();
+      await E2E.waitUntil('框里有可勾选的发票', function () { return mask.querySelector('input[type="checkbox"]'); });
+      E2E.ok(mask.textContent.indexOf('发票') !== -1, '弹出的应就是发票选择框');
+      E2E.ok(document.querySelector('#view-root').getAttribute('data-page') === 'home',
+        '这是弹窗，不该把当前页面顶掉');
+      // 第十八轮：按批次分组 + 没上传 PDF 的也列出来（但勾不了）
+      E2E.ok(mask.textContent.indexOf('打包提交') !== -1,
+        '发票应按批次分组（原来是平铺一堆，看不出哪张是哪批的），实际：' + mask.textContent.slice(0, 200));
+      E2E.ok(mask.textContent.indexOf('王五') !== -1, '分组标题要写清是谁提交的');
+      E2E.ok(/打包提交 · 王五 · \d{2}-\d{2} \d{2}:\d{2}/.test(text('#toast-root') + mask.textContent),
+        '分组标题应是「打包提交 · 提交人 · 时间」，实际：' + mask.textContent.slice(0, 120));
+      var noPdf = mask.querySelectorAll('input[name="inv-pick"][disabled]');
+      E2E.ok(noPdf.length >= 1, '没上传 PDF 的发票要列出来（否则管理员看不出这批还差几张票）');
+      E2E.ok(mask.textContent.indexOf('缺 PDF') !== -1, '要写明哪几张缺 PDF');
+      E2E.clickSelector('[data-inv-check="all"]', mask);
+      var wronglyChecked = Array.prototype.filter.call(noPdf, function (b) { return b.checked; });
+      E2E.ok(wronglyChecked.length === 0, '「全选」不该把缺 PDF 的勾上 —— 勾了也下不了');
+      var counter = mask.querySelector('#inv-pick-count');
+      E2E.ok(counter && counter.textContent.indexOf('可下') !== -1,
+        '计数要说明"可下几张"（区别于一共几张），实际：' + (counter ? counter.textContent : '(没有)'));
+
+      // 一张都没勾时「下载所选」必须禁用（沿用发票选择框原有行为）
+      E2E.clickSelector('[data-inv-check="none"]', mask);
+      var dlBtn = mask.querySelector('[data-inv-download]');
+      E2E.ok(!!dlBtn, '应有「下载所选」按钮');
+      E2E.ok(dlBtn.disabled === true, '一张都没勾时不能下载');
+      E2E.clickSelector('.modal-close', mask);
+      await waitModalGone();
+    });
+
+    await E2E.record('打印标签的批次用「提交人 · 时间」显示，批次号仍查得到', async function () {
+      var reqs = await DB.getAll('purchaseRequests');
+      var batchReqs = reqs.filter(function (r) { return r.name.indexOf('打包') === 0; });
+      var batchId = batchReqs[0].batchId;
+      var applicant = batchReqs[0].applicant;
+      E2E.ok(!!applicant, '这一批应有申请人');
+
+      global.FEVER.App.goto('labels', { batchId: batchId });
+      await E2E.waitUntil('进到标签页', function () {
+        return document.querySelector('#view-root').getAttribute('data-page') === 'labels';
+      });
+      await E2E.waitUntil('页头出现批次说明', function () {
+        return text('#view-root').indexOf(applicant) !== -1;
+      });
+      var head = text('#view-root');
+      E2E.ok(head.indexOf(applicant) !== -1, '页头应写明提交人「' + applicant + '」');
+      E2E.ok(/\d{2}-\d{2} \d{2}:\d{2}/.test(head), '页头应带提交时间，实际：' + head.slice(0, 120));
+      E2E.ok(head.indexOf(batchId) !== -1, '批次号仍然要能看到（出问题时查得清）');
+
+      // 挑选弹窗里的选项文字也是「提交人 · 时间」
+      E2E.clickSelector('[data-act="pick-labels"]');
+      var mask = await modal();
+      await E2E.waitUntil('批次下拉就绪', function () { return mask.querySelector('[name="l-batch"]'); });
+      var sel = mask.querySelector('[name="l-batch"]');
+      var opt = Array.prototype.filter.call(sel.options, function (o) { return o.value === batchId; })[0];
+      E2E.ok(!!opt, '下拉里应有这一批');
+      E2E.ok(opt && opt.textContent.indexOf(applicant) !== -1,
+        '选项文字应是「提交人 · 时间」，实际：' + (opt ? opt.textContent : '(没有)'));
+      E2E.ok(opt && opt.getAttribute('title') === '批次号 ' + batchId,
+        '批次号放在悬停提示里，实际：' + (opt ? opt.getAttribute('title') : '(没有)'));
+      E2E.clickSelector('.modal-close', mask);
+      await waitModalGone();
+    });
+
+await E2E.record('采购申请的兵种下拉列全量：新兵种还没人用过也要能选到（第二十二轮）', async function () {
+      var Rules = global.FEVER.Rules;
+      var NEW_TROOPS = ['舵轮机器人', '老步兵机器人', '新步兵机器人'];
+      var OLD_TROOPS = ['重装', '轮腿步兵', '过洞步兵', '可折叠步兵', '哨兵'];
+
+      // 前提：这三个兵种当前没有任何申请用过（正是原来"看不到"的原因）
+      var used = (await DB.getAll('purchaseRequests')).map(function (r) { return Rules.troopOf(r); });
+      NEW_TROOPS.forEach(function (t) {
+        E2E.ok(used.indexOf(t) === -1, '这条用例的前提是「还没人用过 ' + t + '」');
+      });
+
+      // ⚠️ 先跳走再进：同路由 goto 是原地重渲染，会点到旧页面上
+      App.goto('home');
+      await E2E.waitUntil('先离开', function () {
+        return document.querySelector('#view-root').getAttribute('data-page') === 'home';
+      });
+      App.goto('purchases');
+      await E2E.waitUntil('采购页就绪', function () { return document.querySelector('[name="f-troop"]'); });
+
+      var sel = document.querySelector('[name="f-troop"]');
+      var opts = Array.prototype.map.call(sel.options, function (o) { return o.value; });
+      NEW_TROOPS.forEach(function (t) {
+        E2E.ok(opts.indexOf(t) !== -1,
+          '筛选下拉里必须有 ' + t + '（哪怕还没人提过申请），实际：' + opts.join('、'));
+      });
+      OLD_TROOPS.forEach(function (t) {
+        E2E.ok(opts.indexOf(t) !== -1, '本轮定的是"纯新增"，旧的 ' + t + ' 不该被删掉');
+      });
+      E2E.ok(opts.indexOf('步兵') === -1, '历史值「步兵」仍然不出现在下拉框里');
+
+      // 新建申请表单里也能选到（那才是真正写入兵种的地方）
+      E2E.clickSelector('[data-act="new-purchase"]');
+      var mask = await modal();
+      await E2E.waitUntil('表单里有兵种下拉', function () { return mask.querySelector('[name="troop"]'); });
+      var formOpts = Array.prototype.map.call(mask.querySelector('[name="troop"]').options,
+        function (o) { return o.value; });
+      NEW_TROOPS.forEach(function (t) {
+        E2E.ok(formOpts.indexOf(t) !== -1, '新建申请表单里也要能选 ' + t + '，实际：' + formOpts.join('、'));
+      });
+      E2E.clickSelector('.modal-close', mask);
+      await waitModalGone();
+    });
+    await E2E.record('兵种预算：直接入库买的钱也算进「已用」（第二十五轮）', async function () {
+      await E2E.resetDb();
+      await global.FEVER.Rules.initCategories();
+      var now = DB.nowIso();
+      // 一条已同意的申请 1000
+      await DB.add('purchaseRequests', {
+        categoryId: 'vision', troop: '步兵', name: '申请件', spec: '', quantity: 1, budget: '1000',
+        purpose: '', applicant: '甲', status: 'approved', approval: 'approved', createdAt: now, updatedAt: now
+      });
+      // 一件直接入库买的东西，总价 300（没走采购申请，以前这笔钱在预算里看不见）
+      await global.FEVER.Ops.inbound({
+        categoryId: 'vision', troop: '步兵', name: '直接买的镜头', spec: '12mm',
+        quantity: 1, totalPrice: '300', operator: '张三', identityMode: 'single'
+      });
+      await DB.setSetting(global.FEVER.Stats.BUDGET_KEY, { 步兵: 5000 });
+
+      await gotoTab('budgets');
+      await E2E.waitUntil('预算页渲染完成', function () {
+        return document.querySelector('#view-root').getAttribute('data-page') === 'budgets' &&
+          body().indexOf('步兵') !== -1;
+      });
+      var t = body();
+      E2E.ok(t.indexOf('1300.00') !== -1, '已用应是 1000+300=1300，页面：' + t.slice(0, 240));
+      E2E.ok(t.indexOf('3700.00') !== -1, '剩余应是 5000−1300=3700');
+      E2E.ok(t.indexOf('入库 ¥300.00') !== -1, '要把构成摊开（让人看得出 300 是入库的）');
+      E2E.ok(t.indexOf('申请 ¥1000.00') !== -1, '也要写明申请那一档');
+      // 口径说明里要写明这件事，不然使用者会以为算错了
+      E2E.ok(t.indexOf('直接入库买的东西') !== -1, '页面上要说明已用包含直接入库');
+      // 第二十六轮：直接入库那笔钱要**能点开看是买了哪些东西**
+      // （这部分没有采购申请可以跳，之前只看到一个金额）
+      E2E.clickSelector('[data-budget-direct]');
+      var detail = await modal();
+      await E2E.waitUntil('明细出来了', function () { return detail.querySelector('[data-goto-item]'); });
+      var dt = detail.textContent.replace(/\s+/g, ' ');
+      E2E.ok(dt.indexOf('直接入库的钱') !== -1, '标题要说清这是直接入库的钱，实际：' + dt.slice(0, 90));
+      E2E.ok(dt.indexOf('步兵') !== -1, '标题里要带上兵种');
+      E2E.ok(dt.indexOf('直接买的镜头') !== -1, '明细里要有那件物品，实际：' + dt.slice(0, 200));
+      E2E.ok(/共\s*1\s*件，合计\s*¥300\.00/.test(dt), '要给出件数与合计，实际：' + dt.slice(0, 200));
+      E2E.ok(dt.indexOf('张') !== -1 || dt.indexOf('张三') !== -1, '要能看到是谁录进系统的');
+
+      // 编码可点，且点了之后**明细要让开**（不然弹框盖在详情页上，像没反应）
+      var codeCell = detail.querySelector('[data-goto-item]');
+      var code = codeCell.getAttribute('data-goto-item');
+      E2E.clickSelector('[data-goto-item]', detail);
+      await E2E.waitUntil('跳进了物品详情', function () {
+        return document.querySelector('#view-root').getAttribute('data-page') === 'item';
+      });
+      await E2E.waitUntil('明细弹框自己关掉了', function () { return !document.querySelector('.modal-mask'); });
+      E2E.ok(text('#view-root').indexOf(code) !== -1, '看到的应该是刚才点的那一件：' + code);
     });
 
     E2E.finish();

@@ -17,11 +17,19 @@
 
   var NAV = [
     { key: 'home', label: '物资总览' },
-    // 扫码查物紧跟总览：手机上最高频的动作就是"扫一下看看这件东西在不在、放哪了"，
-    // 排在导航最前面才不用横向滑半天才摸到。
-    { key: 'scan', label: '扫码查物' },
-    { key: 'desk', label: '出入库登记' },
+    // 搜索紧跟总览（第十六轮按需求调整）：打开应用最常干的两件事就是"看全局"和"找东西"
+    { key: 'search', label: '搜索', act: 'open-search' },
+    // 第十七轮：把「批量下载发票」那个勾选框提到顶栏，放在靠前的位置。
+    // 用的就是同一个函数（openInvoicePicker），不做第二套。
+    // 权限沿用原来的口径：只有管理员能批量下载（逐张下载仍然谁都能下）。
+    { key: 'invoices-dl', label: '下载发票', act: 'open-invoices', adminOnly: true },
+    // 第十七轮：「扫码查物」和「出入库登记」合并成这一条 ——
+    // 认出是哪件东西、对它动手，本来就是一件事的两头，不必在两个页面之间来回切。
+    { key: 'scan', label: '扫码 / 登记' },
+    // 打印标签与登记是一对（登记完顺手打标签），所以挨着放（第十六轮新增入口）
+    { key: 'labels', label: '打印标签' },
     { key: 'ledger', label: '借用台账', badge: 'overdue' },
+    { key: 'cart', label: '待提交', badge: 'draft' },
     { key: 'purchases', label: '采购申请', badge: 'pendingPurchase' },
     { key: 'budgets', label: '兵种预算' },
     { key: 'invoices', label: '发票台账' },
@@ -70,6 +78,10 @@
     if (route.name === 'labels' && params.categoryId) {
       return '#labels/cat/' + encodeURIComponent(params.categoryId);
     }
+    // 打印某一整批（打包提交）到货生成的标签：#labels/b/<批次号>
+    if (route.name === 'labels' && params.batchId) {
+      return '#labels/b/' + encodeURIComponent(params.batchId);
+    }
 
     // 扫码查物把"扫到的那个编码"记进地址栏（#scan/MC-0001）：
     // 扫完手一滑刷新了，或者想把结果发给队友核对，还能回到同一件物品上。
@@ -77,6 +89,20 @@
     // 粘进去的任意字符里要是有个 /，就会被当成路径分隔符，切出半截编码。
     if (route.name === 'scan' && params.code) {
       return '#scan/' + encodeURIComponent(String(params.code));
+    }
+
+    // 采购申请页的筛选条件也记账进地址栏（#purchases/p/<JSON>）：
+    // 从兵种预算点「27 次」进来之后刷新一下、或者把链接发给同事，
+    // 不该悄悄退回"全部申请"—— 那看到的就不是那 27 次了。
+    if (route.name === 'purchases' && Object.keys(params).length) {
+      return '#purchases/p/' + encodeURIComponent(JSON.stringify(params));
+    }
+
+    // 「只看某一条采购申请生成的那一批」（#category/vision/req/12）：
+    // 和大类一起记账，刷新/后退都还在同一批里
+    if (route.name === 'category' && params.purchaseRequestId) {
+      return '#category/' + encodeURIComponent(params.id || '') +
+        '/req/' + encodeURIComponent(params.purchaseRequestId);
     }
 
     var parts = [route.name];
@@ -90,16 +116,37 @@
     if (!raw) return { name: 'home', params: {} };
     var parts = raw.split('/');
     var name = parts[0];
-    if (name === 'category') return { name: 'category', params: { id: parts[1] || '' } };
+    if (name === 'category') {
+      var catParams = { id: parts[1] || '' };
+      // 'req' 这个关键字不会和大类 id 撞车 —— 大类 id 都是 mechanical / promo 这种单词
+      if (parts[2] === 'req') catParams.purchaseRequestId = safeDecode(parts[3] || '');
+      return { name: 'category', params: catParams };
+    }
     if (name === 'item') return { name: 'item', params: { code: parts[1] || '' } };
     // #scan 与 #scan/MC-0001 都合法：前者是"还没扫"的入口页，后者是"扫到了这件"的结果页。
     if (name === 'scan') return { name: 'scan', params: { code: safeDecode(parts[1] || '') } };
+    // 批次页：#batch/<批次号>
+    if (name === 'batch') return { name: 'batch', params: { id: safeDecode(parts[1] || '') } };
     if (name === 'labels') {
       // 'batch' / 'cat' 这两个关键字不会和物品编码撞车 —— 编码长得像 MC-0001、VS-0002，
       // 前缀是大写字母，永远不可能是全小写的单词。
       if (parts[1] === 'batch') return { name: 'labels', params: { codes: Rules.decodeCodeList(parts[2] || '') } };
       if (parts[1] === 'cat') return { name: 'labels', params: { categoryId: safeDecode(parts[2] || '') } };
+      if (parts[1] === 'b') return { name: 'labels', params: { batchId: safeDecode(parts[2] || '') } };
       return { name: 'labels', params: { code: parts[1] || '' } };
+    }
+    // 采购申请页的筛选条件（第十五轮）：#purchases/p/<编码后的 JSON>
+    // 用一整个 JSON 而不是拼几段，是因为将来再加筛选条件不用再改这里。
+    if (name === 'purchases') {
+      if (parts[1] === 'p') {
+        try {
+          return { name: 'purchases', params: JSON.parse(safeDecode(parts.slice(2).join('/'))) || {} };
+        } catch (err) {
+          // 地址栏是可以被手改的，解不出来就当没带条件，别让整页打不开
+          return { name: 'purchases', params: {} };
+        }
+      }
+      return { name: 'purchases', params: {} };
     }
     return { name: name, params: {} };
   }
@@ -111,11 +158,14 @@
     scan: function (p) { return Views.scan(p); },
     desk: function () { return Views.desk(); },
     ledger: function () { return Views.lendLedger(); },
-    purchases: function () { return Views.purchases(); },
+    // 采购申请页要收路由参数（从兵种预算点进来带的兵种 + 时间范围），所以必须透传 p
+    purchases: function (p) { return Views.purchases(p); },
     budgets: function () { return Views.budgets(); },
     invoices: function () { return Views.invoices(); },
     txns: function () { return Views.transactions(); },
     labels: function (p) { return Views.labels(p); },
+    cart: function () { return Views.cart(); },
+    batch: function (p) { return Views.batch(p); },
     settings: function () { return Views.settings(); }
   };
 
@@ -132,16 +182,23 @@
 
   function renderNav(activeName) {
     var nav = UI.qs('#main-nav');
-    nav.innerHTML = NAV.map(function (item) {
+    // adminOnly 的项（下载发票）只对管理员画出来 —— 权限跟着人走，
+    // 不能画出来再靠点了之后弹"没权限"
+    var items = NAV.filter(function (item) { return !item.adminOnly || DB.isAdmin(); });
+    nav.innerHTML = items.map(function (item) {
+      // act 类的项（比如搜索）不是页面，点了弹东西而不是切页 —— 所以不挂 data-goto
+      var hook = item.act
+        ? 'data-act="' + UI.esc(item.act) + '"'
+        : 'data-goto="' + UI.esc(item.key) + '"';
       return '<button class="nav-item' + (item.key === activeName ? ' active' : '') + '" ' +
-        'data-goto="' + UI.esc(item.key) + '" type="button">' + UI.esc(item.label) +
+        hook + ' type="button">' + UI.esc(item.label) +
         (item.badge ? '<span class="badge" id="nav-badge-' + UI.esc(item.key) + '" style="display:none"></span>' : '') +
         '</button>';
     }).join('');
     refreshBadges();
   }
 
-  /** 导航上的小红点：超期未还、待处理采购 */
+  /** 导航上的小红点：超期未还、待处理采购、攒着没提交的草稿 */
   function refreshBadges() {
     Ops.lendLedger().then(function (ledger) {
       var overdue = ledger.filter(function (r) { return r.overdue; }).length;
@@ -150,6 +207,10 @@
     DB.getAll('purchaseRequests').then(function (reqs) {
       var pending = reqs.filter(function (r) { return r.status === 'pending' || r.status === 'ordered'; }).length;
       setBadge('nav-badge-purchases', pending);
+    }).catch(function () { /* 忽略 */ });
+    // 待提交清单：攒了东西没提交，导航上要看得见，否则草稿就"存进去就忘了"
+    Ops.loadDraftCart({ key: Rules.ownerKey(DB.currentUser()) }).then(function (list) {
+      setBadge('nav-badge-cart', list.length);
     }).catch(function () { /* 忽略 */ });
   }
 
@@ -357,12 +418,13 @@
    * 存档要的是完整账，按当前筛选导出反而容易漏。
    */
   function exportBudgetsCsv() {
-    DB.runTx(['purchaseRequests', 'invoices'], 'readonly', function (T) {
-      return Promise.all([T.getAll('purchaseRequests'), T.getAll('invoices')]);
+    // items 是第二十五轮加的：直接入库买的东西（填了总价的）也算已用
+    DB.runTx(['purchaseRequests', 'invoices', 'items'], 'readonly', function (T) {
+      return Promise.all([T.getAll('purchaseRequests'), T.getAll('invoices'), T.getAll('items')]);
     }).then(function (arr) {
       return DB.getSetting(Stats.BUDGET_KEY, {}).then(function (budgets) {
         UI.downloadText(backupFilename('FEver兵种预算', '.csv'),
-          Stats.budgetCsv(arr[0], budgets, 'all', DB.nowIso(), arr[1]), 'text/csv');
+          Stats.budgetCsv(arr[0], budgets, 'all', DB.nowIso(), arr[1], arr[2]), 'text/csv');
         UI.toast('兵种预算已导出（含已消费明细与未消费预算）', 'ok');
       });
     });
@@ -389,11 +451,64 @@
       var itemBtn = target.closest('[data-goto-item]');
       if (itemBtn) { goto('item', { code: itemBtn.getAttribute('data-goto-item') }); return; }
 
+      // 采购申请清单点一下（第十五轮）：能跳多深跳多深
+      var openPur = target.closest('[data-open-purchase]');
+      if (openPur) { openPurchaseDeepLink(openPur.getAttribute('data-open-purchase')); return; }
+
+      // 兵种预算点「27 次」：跳到采购申请页并预置筛选（兵种 + 当前预算周期）
+      var drill = target.closest('[data-budget-drill]');
+      if (drill) {
+        goto('purchases', {
+          troop: drill.getAttribute('data-budget-drill'),
+          range: drill.getAttribute('data-drill-range') || 'all'
+        });
+        return;
+      }
+
+      // 兵种预算点「入库 ¥X」：看这笔直接入库的钱买了哪些东西（第二十六轮）
+      var directBtn = target.closest('[data-budget-direct]');
+      if (directBtn) {
+        Forms.openDirectItems({
+          troop: directBtn.getAttribute('data-budget-direct'),
+          range: directBtn.getAttribute('data-drill-range') || 'all'
+        });
+        return;
+      }
+
+      // 采购申请行上的「整批」：进入那一批的批次页（第十五轮）
+      var batchBtn = target.closest('[data-goto-batch]');
+      if (batchBtn) { goto('batch', { id: batchBtn.getAttribute('data-goto-batch') }); return; }
+
+      // 「整批发票」：直接打包下载这一批的发票（第十六轮）——
+      // 不用先进批次页，管理员在采购申请列表上就能一次下完
+      var batchInvBtn = target.closest('[data-batch-invoice-ids]');
+      if (batchInvBtn) {
+        var invIds = String(batchInvBtn.getAttribute('data-batch-invoice-ids') || '').split(',')
+          .map(function (v) { return num(v); }).filter(function (v) { return v > 0; });
+        var missingInv = num(batchInvBtn.getAttribute('data-batch-invoice-missing'));
+        if (missingInv) {
+          UI.toast('这一批还有 ' + missingInv + ' 条没上传发票，打包里不会包含它们', 'warn');
+        }
+        if (!invIds.length) { UI.toast('这一批还没有可下载的发票', 'warn'); return; }
+        if (global.FEVER.App && global.FEVER.App.downloadAllInvoices) {
+          global.FEVER.App.downloadAllInvoices(invIds);
+        } else {
+          UI.toast('这个环境下取不到打包功能', 'err');
+        }
+        return;
+      }
+
       var printItem = target.closest('[data-print-item]');
       if (printItem) { goto('labels', { code: printItem.getAttribute('data-print-item') }); return; }
 
       var invBtn = target.closest('[data-goto-invoice]');
       if (invBtn) { openInvoiceDialog(num(invBtn.getAttribute('data-goto-invoice'))); return; }
+      // 补传 / 更换发票 PDF（第十四周）：到货登记时可以没有发票，事后从这里补
+      var uploadBtn = target.closest('[data-upload-invoice]');
+      if (uploadBtn) { Forms.openUploadInvoice(num(uploadBtn.getAttribute('data-upload-invoice')), { onDone: refresh }); return; }
+      // 改身份方式（第十五轮）：同款共用 ⇄ 单独使用
+      var identityBtn = target.closest('[data-change-identity]');
+      if (identityBtn) { Forms.openChangeIdentity(identityBtn.getAttribute('data-change-identity'), { onDone: refresh }); return; }
 
       var purBtn = target.closest('[data-goto-purchase]');
       if (purBtn) { openPurchaseDialog(num(purBtn.getAttribute('data-goto-purchase'))); return; }
@@ -536,6 +651,9 @@
     if (name === 'export-txns' || name === 'export-txns2') { exportTxnsCsv(); return; }
     if (name === 'export-budgets') { exportBudgetsCsv(); return; }
     if (name === 'notify-test') { runNotifyTest(); return; }
+    if (name === 'open-search') { openSearch(); return; }
+    // 顶栏的「下载发票」：用的就是采购申请页那个勾选框，同一个函数（第十七轮）
+    if (name === 'open-invoices') { openInvoicePicker(); return; }
     if (name === 'edit-item') { openEditItem(node.getAttribute('data-code')); return; }
     if (name === 'edit-budgets') { Forms.openEditBudgets({ onDone: refresh }); return; }
     if (name === 'delete-log') { openDeleteLogDialog(); return; }
@@ -558,7 +676,8 @@
           '<div class="alert-item info" style="margin-bottom:14px"><span>' +
             '出入库流水按原设计是只追加、不删除的。后加的删除功能守住了这条底线：' +
             '<b>每删一条都记一笔，并留下被删内容的快照</b>，需要时能查回来。' +
-            '这里只保留最近 ' + Rules.DELETE_LOG_MAX + ' 条。' +
+            '这里最多保留最近 ' + Rules.DELETE_LOG_MAX + ' 条；每票都带快照，' +
+            '总体积到顶后会自动只保留更近的那一百多条。' +
           '</span></div>' +
           UI.table([
             { label: '时间', render: function (r) { return UI.esc(UI.fmtTime(r.at)); } },
@@ -599,6 +718,93 @@
   }
 
   /**
+   * 采购申请清单点一下（第十五轮）：「能跳多深跳多深」。
+   *   已到货、且只生成了 1 个身份 → 直接进那件物品的详情
+   *   已到货、生成了一批         → 进该大类清单，并自动筛出这一批
+   *   还没到货 / 物品已被删掉     → 进申请详情（物品还不存在，详情里有审批、发票、到货情况）
+   */
+  function openPurchaseDeepLink(requestId) {
+    var id = num(requestId);
+    DB.get('purchaseRequests', id).then(function (req) {
+      if (!req) { UI.toast('找不到这条采购申请', 'err'); return; }
+      if (req.status !== 'arrived') { openPurchaseDialog(id); return; }
+      DB.getAll('items').then(function (all) {
+        var mine = all.filter(function (it) { return String(it.purchaseRequestId) === String(id); });
+        if (mine.length === 1) { goto('item', { code: mine[0].code }); return; }
+        if (mine.length > 1) { goto('category', { id: req.categoryId, purchaseRequestId: id }); return; }
+        openPurchaseDialog(id);
+      });
+    }).catch(function (err) { UI.toast((err && err.message) || '打不开这条申请', 'err'); });
+  }
+
+  /**
+   * 全局搜索（第十五轮）：顶栏一个入口，搜物品与大类。
+   * 结果分两组，点物品进详情、点大类进该类清单 —— 与「页面互联」是同一套落点。
+   * 不搜单据：需求方要的就是"搜某件东西、搜某个大类"，塞进单据只会让结果变杂。
+   */
+  function openSearch() {
+    var m = UI.openModal({
+      title: '搜索物资',
+      wide: true,
+      body:
+        '<div class="field"><label>关键词</label>' +
+          '<input class="input" id="search-input" autocomplete="off" ' +
+            'placeholder="物品编码 / 名称 / 规格 / 位置 / 兵种，或大类名"></div>' +
+        '<div id="search-result"></div>',
+      footer: '<button class="btn" data-cancel type="button">关闭</button>'
+    });
+    var mask = m.el;
+    var input = mask.querySelector('#search-input');
+    var box = mask.querySelector('#search-result');
+
+    function paint() {
+      var kw = String(input.value || '').trim();
+      if (!kw) {
+        box.innerHTML = '<div class="hint">输入关键词开始搜索：可以搜某一件具体物品' +
+          '（编码、名称、规格、位置、兵种），也可以搜大类（如「视觉」）。</div>';
+        return;
+      }
+      Promise.all([DB.getAll('items'), DB.getAll('categories')]).then(function (arr) {
+        var res = Rules.searchAll(arr[0], arr[1], kw);
+        if (!res.items.length && !res.categories.length) {
+          box.innerHTML = '<div class="empty">没找到和「' + UI.esc(kw) + '」有关的物品或大类</div>';
+          return;
+        }
+        box.innerHTML =
+          (res.categories.length
+            ? '<div class="page-sub" style="margin:12px 0 6px">大类（' + res.categoryTotal + '）</div>' +
+              res.categories.map(function (c) {
+                return '<button class="btn small" data-search-cat="' + UI.esc(c.id) + '" type="button">' +
+                  UI.esc(c.icon || '') + ' ' + UI.esc(c.name) + '</button>';
+              }).join(' ')
+            : '') +
+          (res.items.length
+            ? '<div class="page-sub" style="margin:14px 0 6px">物品（' +
+                (res.truncated ? '显示前 ' + res.items.length + ' / 共 ' + res.itemTotal : res.itemTotal) +
+                '）</div>' +
+              res.items.map(function (it) {
+                return '<button class="btn small" data-search-item="' + UI.esc(it.code) + '" type="button">' +
+                  UI.esc(it.code) + ' ' + UI.esc(it.name) + '</button>';
+              }).join(' ')
+            : '');
+      }).catch(function (err) { UI.toast((err && err.message) || '搜索失败', 'err'); });
+    }
+
+    input.addEventListener('input', paint);
+    mask.addEventListener('click', function (e) {
+      var t = e.target.closest ? e.target.closest('[data-search-item],[data-search-cat]') : null;
+      if (!t) return;
+      var code = t.getAttribute('data-search-item');
+      var catId = t.getAttribute('data-search-cat');
+      m.close();
+      if (code) goto('item', { code: code });
+      else if (catId) goto('category', { id: catId });
+    });
+    paint();
+    setTimeout(function () { input.focus(); }, 30);
+  }
+
+  /**
    * 发票选择弹窗：批量下载前先勾一遍，想下哪几张下哪几张。
    *
    * 默认全选（多数时候管理员就是要全部），全不选时下载按钮禁用——
@@ -606,20 +812,75 @@
    * 事件都接在弹窗自己身上（onMount 之后 mask.addEventListener），
    * 不进全局分发，关掉弹窗就一起消失。
    */
+  /**
+   * 批量下载发票的选择框（第十八轮：按批次分组 + 把缺 PDF 的也列出来）。
+   *
+   * 为什么要分组：打包提交之后，管理员面对的是一堆看不出归属的发票，
+   * 找不到自己刚批的那一批。分组标题写清「谁、什么时候、这一批几张、能下几张」。
+   *
+   * 为什么把**没上传 PDF** 的发票也列出来：只列能下的那些，
+   * 管理员根本看不出「这批还差几张票」，只能等队员来问。
+   * 缺附件的照列但不可勾选，并写明缺 PDF —— 看得见才催得动。
+   */
   function openInvoicePicker() {
-    DB.getAll('invoices').then(function (invoices) {
+    Promise.all([DB.getAll('invoices'), DB.getAll('purchaseRequests')]).then(function (arr) {
+      var invoices = arr[0] || [];
+      var requests = arr[1] || [];
+      if (!invoices.length) { UI.toast('还没有登记过发票', 'warn'); return; }
       var withFile = invoices.filter(function (inv) { return inv.fileRef || inv.fileData; });
-      if (!withFile.length) { UI.toast('还没有上传过发票 PDF', 'warn'); return; }
-      // 新的排上面，跟台账一个顺序
-      withFile.sort(function (a, b) { return num(b.id) - num(a.id); });
+      if (!withFile.length) {
+        UI.toast('还没有上传过发票 PDF —— 到货登记时没传的那几张，得让队员补上才下得了', 'warn');
+        return;
+      }
 
-      var rows = withFile.map(function (inv) {
-        return '<label class="inv-pick-row">' +
-          '<input type="checkbox" name="inv-pick" value="' + UI.esc(inv.id) + '" checked>' +
-          '<span class="inv-pick-name">' + UI.esc(Rules.invoiceLabel(inv)) +
-            '<span class="hint">¥' + num(inv.amount).toFixed(2) +
-              (inv.invoiceDate ? ' · ' + UI.esc(inv.invoiceDate) : '') + '</span></span>' +
-        '</label>';
+      var reqById = {};
+      requests.forEach(function (r) { reqById[String(r.id)] = r; });
+
+      // 一次打包提交 = 一个批次，按批次分组；单独提交的各自成组，排在一批后面
+      var groups = [];
+      var byKey = {};
+      invoices.slice().sort(function (a, b) { return num(b.id) - num(a.id); }).forEach(function (inv) {
+        var req = reqById[String(inv.purchaseRequestId)];
+        var key = req && req.batchId ? String(req.batchId) : '';
+        var g = byKey[key];
+        if (!g) {
+          g = byKey[key] = {
+            key: key,
+            applicant: (req && req.applicant) || '',
+            at: (req && req.createdAt) || '',
+            items: []
+          };
+          groups.push(g);
+        }
+        g.items.push(inv);
+      });
+      groups.sort(function (a, b) {
+        if ((a.key ? 1 : 0) !== (b.key ? 1 : 0)) return a.key ? -1 : 1;   // 有批次的排前面
+        return String(b.at) < String(a.at) ? -1 : 1;                      // 新的在前
+      });
+
+      function groupTitle(g) {
+        var who = g.applicant || '（没填申请人）';
+        var at = g.at ? String(g.at).slice(5, 16).replace('T', ' ') : '';
+        return (g.key ? '打包提交' : '单独提交') + ' · ' + who + (at ? ' · ' + at : '');
+      }
+
+      var listHtml = groups.map(function (g) {
+        var okCount = g.items.filter(function (inv) { return inv.fileRef || inv.fileData; }).length;
+        return '<div class="page-sub" style="margin:14px 0 6px">' + UI.esc(groupTitle(g)) +
+          '　——　' + g.items.length + ' 张' + (okCount < g.items.length ? '，可下 ' + okCount : '') +
+          (g.key ? '　<span class="hint">批次 ' + UI.esc(g.key) + '</span>' : '') + '</div>' +
+          '<div class="inv-pick-list">' + g.items.map(function (inv) {
+            var has = !!(inv.fileRef || inv.fileData);
+            return '<label class="inv-pick-row">' +
+              '<input type="checkbox" name="inv-pick" value="' + UI.esc(inv.id) + '" ' +
+              (has ? 'checked' : 'disabled') + '>' +
+              '<span class="inv-pick-name">' + UI.esc(Rules.invoiceLabel(inv)) +
+                '<span class="hint">¥' + num(inv.amount).toFixed(2) +
+                (inv.invoiceDate ? '　·　' + UI.esc(inv.invoiceDate) : '') +
+                (has ? '' : '　·　<b>缺 PDF</b>，没上传附件，勾不了') + '</span></span>' +
+              '</label>';
+          }).join('') + '</div>';
       }).join('');
 
       var m = UI.openModal({
@@ -630,19 +891,19 @@
             '<button class="btn small" data-inv-check="all" type="button">全选</button>' +
             '<button class="btn small" data-inv-check="none" type="button">全不选</button>' +
             '<span class="hint" id="inv-pick-count"></span>' +
-          '</div>' +
-          '<div class="inv-pick-list">' + rows + '</div>',
+          '</div>' + listHtml,
         footer: '<button class="btn primary" data-inv-download type="button" disabled>下载所选</button>'
       });
       var mask = m.el;
 
       function checkedBoxes() {
-        return Array.prototype.slice.call(mask.querySelectorAll('input[name="inv-pick"]:checked'));
+        return Array.prototype.slice.call(mask.querySelectorAll('input[name="inv-pick"]:checked'))
+          .filter(function (b) { return !b.disabled; });
       }
       function paint() {
         var n = checkedBoxes().length;
         var counter = mask.querySelector('#inv-pick-count');
-        if (counter) counter.textContent = '已选 ' + n + ' / ' + withFile.length + ' 张';
+        if (counter) counter.textContent = '已选 ' + n + ' / 可下 ' + withFile.length + ' 张';
         var btn = mask.querySelector('[data-inv-download]');
         if (btn) { btn.disabled = n === 0; btn.textContent = '下载所选（' + n + '）'; }
       }
@@ -654,7 +915,10 @@
         var t = e.target.closest ? e.target.closest('[data-inv-check]') : null;
         if (t) {
           var on = t.getAttribute('data-inv-check') === 'all';
-          Array.prototype.forEach.call(mask.querySelectorAll('input[name="inv-pick"]'), function (b) { b.checked = on; });
+          Array.prototype.forEach.call(mask.querySelectorAll('input[name="inv-pick"]'), function (b) {
+            if (b.disabled) return;   // 缺 PDF 的勾了也下不了，别去动它
+            b.checked = on;
+          });
           paint();
           return;
         }
@@ -733,13 +997,15 @@
                 '<tr><th style="width:130px;background:#fafbfe">发票号码</th><td>' + UI.esc(inv.invoiceNo || '—') + '</td></tr>' +
                 '<tr><th style="background:#fafbfe">供应商</th><td>' + UI.esc(inv.supplier || '-') + '</td></tr>' +
                 '<tr><th style="background:#fafbfe">金额</th><td>' + UI.esc(num(inv.amount).toFixed(2)) + ' 元</td></tr>' +
-                '<tr><th style="background:#fafbfe">发票日期</th><td>' + UI.esc(inv.invoiceDate || '-') + '</td></tr>' +
+                '<tr><th style="background:#fafbfe">到货日期</th><td>' + UI.esc(inv.invoiceDate || '-') + '</td></tr>' +
                 '<tr><th style="background:#fafbfe">登记时间</th><td>' + UI.esc(UI.fmtTime(inv.createdAt)) + '</td></tr>' +
                 '<tr><th style="background:#fafbfe">发票 PDF</th><td>' +
                   ((inv.fileRef || inv.fileData)
                     ? '<button class="btn small primary" data-invoice-pdf="' + UI.esc(inv.id) + '" type="button">下载 ' +
-                      UI.esc(inv.fileName || '发票.pdf') + '</button>'
-                    : '<span class="hint">登记时没有上传 PDF</span>') +
+                      UI.esc(inv.fileName || '发票.pdf') + '</button>' +
+                      ' <button class="btn small" data-upload-invoice="' + UI.esc(inv.id) + '" type="button">更换</button>'
+                    : '<span class="hint">登记时没有上传 PDF</span> ' +
+                      '<button class="btn small primary" data-upload-invoice="' + UI.esc(inv.id) + '" type="button">补传发票 PDF</button>') +
                 '</td></tr>' +
                 '<tr><th style="background:#fafbfe">来源采购申请</th><td>' +
                   (rel.missing
@@ -788,6 +1054,14 @@
                     '<tr><th style="background:#fafbfe">数量 / 预算</th><td>' + UI.esc(num(req.quantity)) + ' 个 / ' +
                       UI.esc(req.budget || '-') + ' 元</td></tr>' +
                     '<tr><th style="background:#fafbfe">申请人</th><td>' + UI.esc(req.applicant || '-') + '</td></tr>' +
+                    '<tr><th style="background:#fafbfe">购买链接</th><td>' +
+                      (function () {
+                        var href = Rules.purchaseLink(req.link);
+                        return href
+                          ? '<a class="btn small" href="' + UI.esc(href) + '" target="_blank" rel="noopener noreferrer">打开商品页</a>' +
+                            '<div class="hint" style="word-break:break-all">' + UI.esc(href) + '</div>'
+                          : '<span class="hint">没填</span>';
+                      })() + '</td></tr>' +
                     '<tr><th style="background:#fafbfe">用途</th><td>' + UI.esc(req.purpose || '-') + '</td></tr>' +
                     '<tr><th style="background:#fafbfe">状态</th><td>' +
                       UI.esc(Rules.INVOICE_STATUS_NAMES[req.status] || req.status) + '</td></tr>' +
@@ -807,7 +1081,11 @@
 
   /** 编辑物品（改名称、规格、位置、安全库存、备注、专属字段；编码不可改） */
   function openEditItem(code) {
-    DB.get('items', code).then(function (item) {
+    // 第二十四轮：改名之后如果跟别的大类里的物品撞名，要提醒一句。
+    // （编辑时大类本来就改不了，所以这里**只提示**，不帮着切。）
+    Promise.all([DB.get('items', code), DB.getAll('items')]).then(function (arr) {
+      var item = arr[0];
+      var allItems = arr[1] || [];
       if (!item) { UI.toast('找不到该物品', 'err'); return; }
       DB.get('categories', item.categoryId).then(function (cat) {
         var special = (cat && cat.extraFields || []).map(function (f) {
@@ -827,14 +1105,26 @@
         var m = UI.openModal({
           title: '编辑物品　·　' + item.code,
           wide: true,
-          body: '<div class="alert-item info" style="margin-bottom:12px"><span>编码 ' + UI.esc(item.code) +
-            ' 是这件物品的身份，已经贴好的标签不会失效，所以不能改。</span></div>' +
+          body: '<div id="ei-same-name"></div>' +
+            '<div class="alert-item info" style="margin-bottom:12px"><span>编码 ' + UI.esc(item.code) +
+            ' 是这件物品的身份，已经贴好的标签不会失效，所以不能改。' +
+            '<b>所属大类也不能改</b> —— 编码前缀（如 MC-）由大类决定，换大类等于换身份，' +
+            '已贴的标签就对不上了；确实要换就重新入库一件。</span></div>' +
             '<div class="form-grid">' +
               UI.field({ label: '物品名称', name: 'name', required: true, value: item.name }) +
               UI.field({ label: '规格 / 型号', name: 'spec', value: item.spec || '' }) +
               UI.field({ label: '存放位置', name: 'location', value: item.location || '' }) +
+              // 价格与购买时间（第二十三轮）：入库那一次填错就锁死了，这里补上修改入口。
+              // 校验用的是 Rules.parseOptionalPrice/Date —— 和入库同一份规则。
+              UI.field({ label: '总价（元）', name: 'totalPrice', type: 'number', min: 0, step: '0.01',
+                value: item.totalPrice === null || item.totalPrice === undefined ? '' : item.totalPrice,
+                hint: '入库时填错了可以在这里改' }) +
+              UI.field({ label: '购买时间', name: 'purchaseDate', type: 'date',
+                value: item.purchaseDate || '' }) +
               UI.field({ label: '兵种', name: 'troop', type: 'select',
-                options: [{ value: '', label: '（未指定）' }].concat(Rules.TROOPS.map(function (t) {
+                // troopChoices(item.troop)：这件物品现在如果是历史兵种（老的「步兵」），
+                // 也要把它列出来并选中，否则一保存就被换成别的兵种
+                options: [{ value: '', label: '（未指定）' }].concat(Rules.troopChoices(item.troop).map(function (t) {
                   return { value: t, label: t, selected: t === Rules.troopOf(item) };
                 })),
                 value: Rules.troopOf(item),
@@ -850,14 +1140,52 @@
         });
 
         m.el.querySelector('[data-cancel]').addEventListener('click', m.close);
+
+        // 改名撞名就提醒（第二十四轮）。排除自己 —— 不然原样保存都会冒一条提示。
+        function checkSameName() {
+          var box = m.el.querySelector('#ei-same-name');
+          if (!box) return;
+          var typed = String(UI.val(m.el, 'name') || '').trim();
+          var same = Rules.sameNameItems(allItems, typed).filter(function (it) {
+            return it.code !== code;
+          });
+          if (!same.length) { box.innerHTML = ''; return; }
+          var others = same.filter(function (it) { return it.categoryId !== item.categoryId; });
+          var ids = {};
+          same.forEach(function (it) { ids[it.categoryId] = (ids[it.categoryId] || 0) + 1; });
+          var desc = Object.keys(ids).map(function (id) {
+            if (id === item.categoryId) return '「本类」' + ids[id] + ' 件';
+            return '「' + id + '」' + ids[id] + ' 件';   // 大类名这里拿不到全部，用 id 已足够提示
+          }).join('、');
+          box.innerHTML = '<div class="alert-item ' + (others.length ? 'warn' : 'info') + '">' +
+            '<span class="who">已有同名物品</span><span>库里还有 ' + same.length +
+            ' 件叫这个名字的（' + UI.esc(desc) + '）。' +
+            (others.length
+              ? '<b>同名散在几个大类里，清点和搜索都会别扭</b> —— 建议把名字写得更具体一点，' +
+                '或者把它归到同一个大类（大类改不了，需要就重新入库一件）。'
+              : '和它同属一个类，没问题。') +
+            '</span></div>';
+        }
+        var eiTimer = null;
+        m.el.addEventListener('input', function (e) {
+          if (e.target.name !== 'name') return;
+          if (eiTimer) clearTimeout(eiTimer);
+          eiTimer = setTimeout(checkSameName, 200);
+        });
         m.el.querySelector('[data-ok]').addEventListener('click', function () {
           var mask = m.el;
           var name = UI.val(mask, 'name');
           if (!name) { UI.toast('物品名称不能为空', 'warn'); return; }
+          // 价格 / 日期用和入库同一套规则校验（Rules.parseOptionalPrice/Date），
+          // 不然会出现"入库时拦得住、编辑时塞得进负数"这种两边不一致
+          var price = Rules.parseOptionalPrice(UI.val(mask, 'totalPrice'));
+          if (!price.ok) { UI.toast('总价：' + price.message, 'warn'); return; }
           var draft = JSON.parse(JSON.stringify(item));
           draft.name = name;
           draft.spec = UI.val(mask, 'spec');
           draft.location = UI.val(mask, 'location');
+          draft.totalPrice = price.value;
+          draft.purchaseDate = Rules.parseOptionalDate(UI.val(mask, 'purchaseDate')).value;
           draft.troop = Rules.normalizeTroop(UI.val(mask, 'troop'));
           var safety = UI.val(mask, 'safetyStock');
           draft.safetyStock = safety === '' ? null : num(safety);
@@ -903,6 +1231,8 @@
   global.FEVER.App = {
     goto: goto, refresh: refresh,
     exportBackup: doExportBackup, importBackup: doImportBackup,
-    importFromText: importFromText
+    importFromText: importFromText,
+    // 批次页要按批次打包发票，复用这里已经写好的 zip 打包（见 downloadAllInvoices）
+    downloadAllInvoices: downloadAllInvoices
   };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

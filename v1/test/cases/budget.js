@@ -185,7 +185,8 @@ module.exports.register = function (H, DB, Rules, Ops) {
       req({ id: 1, troop: '步兵', budget: 6000 })
     ], { 步兵: 10000 }, 'all', NOW, []);
 
-    assert(csv.indexOf('兵种,预算额度,已用（已同意）') === 0, '第一段应是总表，表头打头');
+    // 第二十五轮：已用拆成「已同意申请 + 直接入库」两列摊开，金额对得上才不让人怀疑
+    assert(csv.indexOf('兵种,预算额度,已用,其中·已同意申请,其中·直接入库') === 0, '第一段应是总表，表头打头');
     assert(csv.indexOf('【已消费明细】') !== -1, '应有「已消费明细」段');
     assert(csv.indexOf('【未消费预算】') !== -1, '应有「未消费预算」段');
     assert(csv.indexOf('兵种,申请编号,物品名称') !== -1, '明细段应有自己的表头');
@@ -241,5 +242,96 @@ module.exports.register = function (H, DB, Rules, Ops) {
     assert(typeof csv === 'string' && csv.length > 0, '空数据也应产出可下载的 CSV');
     assert(csv.indexOf('还没有已同意的申请') !== -1, '没有消费时明细段给说明');
     assert(csv.indexOf('所有兵种的预算都已用完') !== -1, '没有预算时未消费段给说明');
+  });
+
+  /* ---------- 第二十五轮：直接入库花的钱也算已用 ---------- */
+
+  /** 造一件"直接入库"的物品（带兵种与总价） */
+  function item(over) {
+    return Object.assign({
+      code: 'MC-0001', name: '直接买的件', categoryId: 'mechanical', troop: '步兵',
+      totalPrice: 300, createdAt: '2026-09-10T00:00:00.000Z'
+    }, over);
+  }
+
+  test('已用 = 已同意申请 + 直接入库的物品总价', async () => {
+    const summary = Stats.budgetSummary(
+      [req({ id: 1, troop: '步兵', budget: 1000 })],
+      { 步兵: 5000 }, 'all', NOW, [], [item({ troop: '步兵', totalPrice: 300 })]
+    );
+    const r = rowOf(summary, '步兵');
+    assertEqual(r.used, 1000, '这一档仍是"已同意的申请"');
+    assertEqual(r.direct, 300, '直接入库的钱单独记一档');
+    assertEqual(r.spent, 1300, '已用 = 两者相加');
+    assertEqual(r.remaining, 3700, '剩余 = 预算 − 已用（不是只减申请）');
+    assertEqual(Math.round(r.usage * 100), 26, '使用率也要按已用算');
+    assertEqual(summary.total.spent, 1300, '总额同理');
+  });
+
+  test('没填价的物品不算花销（填 0 也不算）', async () => {
+    // 给个额度，好让这一行存在（没额度又没花钱的兵种本来就不该凭空出现一行）
+    const summary = Stats.budgetSummary([], { 步兵: 5000 }, 'all', NOW, [], [
+      item({ troop: '步兵', totalPrice: null }),
+      item({ code: 'MC-0002', troop: '步兵', totalPrice: 0 }),
+      item({ code: 'MC-0003', troop: '步兵', totalPrice: undefined }),
+      item({ code: 'MC-0004', troop: '步兵', totalPrice: '乱写的' })
+    ]);
+    const r = rowOf(summary, '步兵');
+    assertEqual(r.direct, 0, '没填价/填 0/乱填的一律不占预算');
+    assertEqual(r.spent, 0);
+  });
+
+  test('直接入库会让兵种超支（判定用的是已用，不是只看申请）', async () => {
+    // 申请一分钱没有，全靠直接入库花超
+    const summary = Stats.budgetSummary([], { 步兵: 500 }, 'all', NOW, [], [
+      item({ troop: '步兵', totalPrice: 800 })
+    ]);
+    const r = rowOf(summary, '步兵');
+    assertEqual(r.budget, 500, '预算要建行（配了额度就得看得见）');
+    assertEqual(r.spent, 800);
+    assertEqual(r.remaining, -300);
+    assertEqual(r.over, true, '花超了就要标出来');
+    assertEqual(summary.total.over, 1);
+  });
+
+  test('直接入库也按时间范围筛（createdAt）', async () => {
+    const items = [
+      item({ troop: '步兵', totalPrice: 100, createdAt: '2026-09-10T00:00:00.000Z' }),
+      item({ code: 'MC-0002', troop: '步兵', totalPrice: 700, createdAt: '2025-01-10T00:00:00.000Z' })
+    ];
+    const inRange = Stats.budgetSummary([], { 步兵: 5000 }, 'month', NOW, [], items);
+    assertEqual(rowOf(inRange, '步兵').direct, 100, '只算范围内的那一件');
+    const all = Stats.budgetSummary([], { 步兵: 5000 }, 'all', NOW, [], items);
+    assertEqual(rowOf(all, '步兵').direct, 800, '全部口径下两件都算');
+  });
+
+  test('物品没填兵种时归到「未指定」，照样计入总额', async () => {
+    const summary = Stats.budgetSummary([], {}, 'all', NOW, [], [
+      item({ troop: '', totalPrice: 250 })
+    ]);
+    const r = rowOf(summary, Stats.UNSPECIFIED);
+    assert(r, '应有一行「未指定」');
+    assertEqual(r.spent, 250);
+    assertEqual(summary.total.spent, 250, '明细加起来要等于总额');
+    assertEqual(summary.total.unspecifiedUsed, 250);
+  });
+
+  test('不传 items 时行为不变（老调用点不会突然算错）', async () => {
+    const summary = Stats.budgetSummary([req({ id: 1, troop: '步兵', budget: 1000 })], { 步兵: 5000 }, 'all', NOW, []);
+    const r = rowOf(summary, '步兵');
+    assertEqual(r.direct, 0);
+    assertEqual(r.spent, 1000, '没有物品数据时，已用就是申请金额');
+  });
+
+  test('导出的 CSV 把「已用」的构成摊开', async () => {
+    const csv = Stats.budgetCsv(
+      [req({ id: 1, troop: '步兵', budget: 1000 })], { 步兵: 5000 }, 'all', NOW, [],
+      [item({ troop: '步兵', totalPrice: 300 })]
+    );
+    const head = csv.split('\n')[0];
+    assert(head.indexOf('已用') !== -1, '要有「已用」列');
+    assert(head.indexOf('其中·已同意申请') !== -1, '要摊开成申请那一档');
+    assert(head.indexOf('其中·直接入库') !== -1, '要摊开成入库那一档');
+    assert(csv.indexOf('1300.00') !== -1, '已用是 1000 + 300');
   });
 };

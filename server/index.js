@@ -34,27 +34,70 @@ const session = require('./lib/session');
 
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 
+/**
+ * 读取配置。三种来源，优先级从高到低：
+ *
+ *   1. 环境变量 `FEVER_CONFIG_JSON` —— 整段配置 JSON（云平台上一个变量就搞定）
+ *   2. 分项环境变量 `FEVER_APP_ID` / `FEVER_APP_SECRET` / `FEVER_BITABLE_TOKEN` / `FEVER_ADMINS`
+ *   3. 本机 `server/config.json`（离线版、自建服务器用）
+ *
+ * 为什么要有前两条：免费云托管（Render 等）的磁盘是**临时的**，配置文件放不进去；
+ * 而 config.json 里有 appSecret，也不该提交进仓库。用环境变量既安全又不用改文件。
+ */
 function loadConfig() {
-  if (!fs.existsSync(CONFIG_PATH)) {
-    console.error('[启动失败] 找不到 ' + CONFIG_PATH);
-    console.error('请先复制 config.example.json 为 config.json，并填入飞书应用的 App ID / App Secret。');
-    process.exit(1);
+  let cfg = null;
+  let source = '';
+
+  if (process.env.FEVER_CONFIG_JSON) {
+    try {
+      cfg = JSON.parse(process.env.FEVER_CONFIG_JSON);
+    } catch (err) {
+      console.error('[启动失败] 环境变量 FEVER_CONFIG_JSON 不是合法的 JSON：' + err.message);
+      process.exit(1);
+    }
+    source = '环境变量 FEVER_CONFIG_JSON';
+  } else if (process.env.FEVER_APP_ID || process.env.FEVER_APP_SECRET) {
+    const list = function (raw) {
+      return String(raw || '').split(',').map(function (s) { return s.trim(); })
+        .filter(function (s) { return !!s; });
+    };
+    cfg = {
+      appId: process.env.FEVER_APP_ID || '',
+      appSecret: process.env.FEVER_APP_SECRET || '',
+      bitableAppToken: process.env.FEVER_BITABLE_TOKEN || '',
+      folderToken: process.env.FEVER_FOLDER_TOKEN || '',
+      admins: list(process.env.FEVER_ADMINS),
+      allowedOrigins: list(process.env.FEVER_ALLOWED_ORIGINS),
+      groupWebhook: process.env.FEVER_GROUP_WEBHOOK || ''
+    };
+    source = '分项环境变量';
+  } else {
+    if (!fs.existsSync(CONFIG_PATH)) {
+      console.error('[启动失败] 找不到 ' + CONFIG_PATH + '，也没有提供配置环境变量。');
+      console.error('两种办法：');
+      console.error('  · 本机运行：复制 config.example.json 为 config.json，填入飞书应用的 App ID / App Secret；');
+      console.error('  · 云平台运行：设置环境变量 FEVER_CONFIG_JSON（整段配置 JSON），');
+      console.error('    或分别设置 FEVER_APP_ID / FEVER_APP_SECRET / FEVER_BITABLE_TOKEN。');
+      process.exit(1);
+    }
+    try {
+      cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+    } catch (err) {
+      console.error('[启动失败] config.json 不是合法的 JSON：' + err.message);
+      process.exit(1);
+    }
+    source = 'server/config.json';
   }
-  let cfg;
-  try {
-    cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-  } catch (err) {
-    console.error('[启动失败] config.json 不是合法的 JSON：' + err.message);
-    process.exit(1);
-  }
+
   if (!cfg.appId || !cfg.appSecret) {
-    console.error('[启动失败] config.json 里缺 appId 或 appSecret。');
+    console.error('[启动失败] 配置里缺 appId 或 appSecret（来源：' + source + '）。');
     console.error('在飞书开发者后台 → 你的应用 → 凭证与基础信息 里可以拿到这两个值。');
     process.exit(1);
   }
   if (!cfg.bitableAppToken) {
-    console.error('[启动失败] config.json 里还没有 bitableAppToken。');
-    console.error('先运行一次 `npm run init:base` 创建多维表格，脚本会把 app_token 自动写回来。');
+    console.error('[启动失败] 配置里还没有 bitableAppToken（来源：' + source + '）。');
+    console.error('先运行一次 `npm run init:base` 创建多维表格，脚本会把 app_token 自动写回来；');
+    console.error('云平台部署时把它填进 FEVER_BITABLE_TOKEN，或写进 FEVER_CONFIG_JSON。');
     process.exit(1);
   }
   cfg.allowedOrigins = cfg.allowedOrigins && cfg.allowedOrigins.length ? cfg.allowedOrigins : ['*'];
@@ -495,7 +538,36 @@ function collectPurchaseEvents(ops, before, after) {
 
 /** 把事件发出去。同步返回，内部异步发 —— applyOps 不等它 */
 function dispatchPurchaseNotifications(events, approver) {
-  events.forEach(function (ev) {
+  // 第十五轮：一次「打包提交」= 同一个 batchId 下的多条申请。
+  // 需求方明确要求这种情况管理员**只收到一条提醒** —— 十件东西发十条私聊，
+  // 谁都会去把提醒关掉，那提醒就等于没有。其余的（单条提交、批准）照旧逐条发。
+  var batchOf = {};
+  var queue = [];
+  (events || []).forEach(function (ev) {
+    var bid = ev.type === 'submitted' && ev.request ? String(ev.request.batchId || '') : '';
+    if (!bid) { queue.push(ev); return; }
+    if (!batchOf[bid]) {
+      batchOf[bid] = [];
+      queue.push({ type: 'submitted', batchId: bid, requests: batchOf[bid] });
+    }
+    batchOf[bid].push(ev.request);
+  });
+
+  queue.forEach(function (ev) {
+    // 打包提交：一条提醒里把整批说清楚（最多列 5 件，剩下的说"等 N 件"）
+    if (ev.requests) {
+      const list = ev.requests;
+      const head = list.slice(0, 5).map(function (r) {
+        return r.name + ' ×' + (r.quantity || '?');
+      }).join('、');
+      const batchText = '【FEver 物资】' + (list[0].applicant || '有队员') + ' 一次提交了 ' +
+        list.length + ' 条采购申请（批次 ' + ev.batchId + '）：' + head +
+        (list.length > 5 ? ' 等' : '') + '，等你审批。打开应用处理：' + appUrl();
+      adminOpenIds().forEach(function (openId) { notifyOpenId(openId, batchText); });
+      notifyGroup(batchText);
+      return;
+    }
+
     const req = ev.request;
     const desc = req.name + ' ×' + (req.quantity || '?') + '（' + (req.applicant || '未知申请人') +
       ' 申请，预算 ' + (req.budget || '-') + ' 元）';
@@ -526,6 +598,58 @@ function dispatchPurchaseNotifications(events, approver) {
     notifyOpenId(target, approvedText);
     notifyGroup(approvedText);
   });
+}
+
+/**
+ * 提醒补齐发票（第十五轮，管理员专用）。
+ *
+ * 发票常常比货晚到，一批申请里有一两件没上传是常事。管理员点一下，把名单发给服务端：
+ * 能查到飞书身份的私聊催一遍，**查不到的如实回报**（reason: 'not_found'）。
+ *
+ * 为什么不"查不到就静默跳过"：那样界面只能说"已提醒"，而实际上谁都没收到 ——
+ * 需求方要的是"发不出去就明说"。openId 只有本人登录过一次应用之后我们才有，
+ * 所以这条限制是真实存在的，必须让人看见。
+ */
+async function handleNotifyInvoice(req, res) {
+  const session = requireSession(req, res);
+  if (!session) return;
+  if (req.method !== 'POST') { sendJson(req, res, 405, { ok: false, message: '请用 POST' }); return; }
+  if (!isAdminUser(session)) {
+    sendJson(req, res, 403, { ok: false, message: '只有管理员能提醒别人补发票' });
+    return;
+  }
+
+  const body = await readBody(req).catch(function () { return {}; });
+  const names = Array.isArray(body && body.names) ? body.names : [];
+  const batchId = String((body && body.batchId) || '');
+  const text = '【FEver 物资】你有采购申请的发票还没上传' +
+    (batchId ? '（批次 ' + batchId + '）' : '') + '，麻烦把发票 PDF 补上。打开应用：' + appUrl();
+
+  const results = [];
+  for (let i = 0; i < names.length; i += 1) {
+    const name = String(names[i] || '').trim();
+    if (!name) continue;
+    // 姓名是我们自己填的，只能拿去跟登录记录对（老数据没有 openId 字段）
+    let openId = '';
+    Object.keys(knownUsers).forEach(function (id) {
+      if (!openId && knownUsers[id] && sameIdentity(knownUsers[id].name, name)) openId = id;
+    });
+    if (!openId) {
+      results.push({ name: name, sent: false, reason: 'not_found' });
+      continue;
+    }
+    try {
+      await feishu.sendMessage(CONFIG, openId, text);
+      results.push({ name: name, sent: true, openId: openId });
+    } catch (err) {
+      results.push({
+        name: name, sent: false, reason: 'error',
+        error: String((err && err.message) || err),
+        feishuCode: err && err.feishuCode !== undefined ? err.feishuCode : null
+      });
+    }
+  }
+  sendJson(req, res, 200, { ok: true, batchId: batchId, results: results });
 }
 
 /**
@@ -1015,6 +1139,172 @@ async function handleData(req, res) {
   });
 }
 
+/**
+ * 给前端**领一段新编码**（第二十六轮）。
+ *
+ * 为什么发号要挪到服务端：物品编码的序号原来是前端各自在本机算的 ——
+ * 两个人同时添加物品，都会算出 MC-0007，服务端只能拒掉后一个（409），
+ * 前端于是"保存失败：编号已被占用…请重新操作一次"并重拉全量数据。
+ * 使用者感受到的就是"编号被占用 + 卡一下 + 得重来一遍"。
+ *
+ * 现在的做法是「服务端发号 + 前端领一段存着用」：
+ *   · 发号走 enqueue 串行队列 → 两个请求**不可能**拿到同一段
+ *   · 水位写进 settings 的 `codeCounter:<前缀>`（与离线版同一个键名）**持久化**，
+ *     服务端重启后能从表里读回来 —— 不持久化的话，重启会把已经发出去的号再发一次
+ *   · settings 里还没有水位时，从物品表扫该前缀的最大号（兼容最早的数据）
+ *
+ * 代价是**编码会跳号**：前端领 20 个只用了 2 个，下次从第 21 个接着发。
+ * 编码只是标识，跳号不影响扫码、统计与标签。
+ */
+/**
+ * 发号的**核心**：在镜像上算出一段号，并把水位落库。
+ *
+ * ⚠️ 调用方必须已经在 enqueue 队列里 —— 这里**不进队列**（enqueue 内部再 enqueue 会死锁，
+ * 因为它等的是自己完成）。抽成独立函数是为了能直接测：HTTP 那层只做鉴权与读参。
+ *
+ * 水位存 settings 的 `codeCounter:<前缀>`（与离线版同一个键名），走 applyOps 落库 ——
+ * 于是"发出去了但没记住"不会发生，服务端重启后也不会把旧号再发一遍。
+ */
+async function allocateCodes(prefix, count, actor) {
+  // 防御性校验也放这儿（HTTP 那层另有一道早失败）：任何调用方都不能拿乱前缀来占号
+  if (!/^[A-Z]{1,4}$/.test(String(prefix || ''))) {
+    throw new Error('编码前缀不合法：' + prefix);
+  }
+  const span = await allocateSpan('codeCounter:' + prefix, count, function (mirror) {
+    // 老库还没有水位行：扫物品表里该前缀的最大号（与离线版同一套规则）
+    let max = 0;
+    (mirror.items || []).forEach(function (it) {
+      if (!it || !it.code || it.code.indexOf(prefix + '-') !== 0) return;
+      const parsed = parseInt(it.code.slice(prefix.length + 1), 10);
+      if (!isNaN(parsed) && parsed > max) max = parsed;
+    });
+    return max;
+  }, actor);
+
+  const codes = [];
+  for (let i = span.from; i <= span.to; i += 1) {
+    codes.push(prefix + '-' + String(i).padStart(4, '0'));
+  }
+  return { codes: codes, prefix: prefix, from: span.from, to: span.to, watermark: span.watermark };
+}
+
+/**
+ * 发号的**公共内核**：算一段号 + 把水位落库。
+ *
+ * 两种用途共用它（第二十八轮把记录 id 也纳进来）：
+ *   · 物品编码 → 水位键 `codeCounter:<前缀>`
+ *   · 记录 id  → 水位键 `idCounter:<表名>`
+ *
+ * ⚠️ 调用方必须已经在 enqueue 队列里（这里不进队列：enqueue 内再 enqueue 会死锁）。
+ * ⚠️ 水位**必须落库**：不落库的话服务端一重启，就会把已经发出去的号再发一遍 ——
+ * 那正是"编号被占用"的另一种来源。优先读水位、没有水位才去扫数据里的最大值。
+ *
+ * computeBase(mirror)：老库还没有水位行时，怎么从现有数据推出起点（两种用途各有一套规则）。
+ */
+async function allocateSpan(counterKey, count, computeBase, actor) {
+  const mirror = await loadAll(false);
+  const row = (mirror.settings || []).filter(function (r) { return r && r.key === counterKey; })[0];
+  // ⚠️ 取「水位」与「数据里实际最大值」的**较大值**：
+  // 只看水位的话，一旦有人手工导入过一批大号记录（或别的写入绕过了发号），
+  // 水位就会落后于数据 → 发出已经被占用的号。
+  const fromData = computeBase(mirror);
+  const fromWatermark = row && typeof row.value === 'number' ? row.value : 0;
+  const base = Math.max(Number(fromWatermark) || 0, fromData);
+
+  await applyOps([{
+    type: 'put',
+    store: 'settings',
+    data: { key: counterKey, value: base + count, updatedAt: new Date().toISOString() }
+  }], actor);
+
+  return { from: base + 1, to: base + count, watermark: base + count };
+}
+
+/**
+ * 发一段**记录 id**（第二十八轮）。
+ *
+ * 为什么连 id 也要服务端发：申请号 / 发票号 / 流水号原来是前端各自在本机计数器上算的
+ * （`db-remote.js` 的 `counters`），而**每次添加物品都会写一条入库流水** ——
+ * 两个人同时添加，几乎必然分到同一个流水 id，服务端只能 409 拒绝
+ * （「编号 N 已被占用」）。上一轮只把物品编码改成服务端发号，漏了 id 这一半。
+ */
+async function allocateIds(storeName, count, actor) {
+  if (!store.isStore(storeName) || !store.SPECS[storeName].autoId) {
+    throw new Error('这张表不用自增编号：' + storeName);
+  }
+  const span = await allocateSpan('idCounter:' + storeName, count, function (mirror) {
+    // 老库还没有水位行：从这张表现有的最大 id 往后接
+    let max = 0;
+    (mirror[storeName] || []).forEach(function (r) {
+      const id = Number(r && r.id);
+      if (!isNaN(id) && id > max) max = id;
+    });
+    return max;
+  }, actor);
+
+  const ids = [];
+  for (let i = span.from; i <= span.to; i += 1) ids.push(i);
+  return { store: storeName, ids: ids, from: span.from, to: span.to, watermark: span.watermark };
+}
+
+/** POST /api/reserve-ids —— 领一段记录 id（用途见 allocateIds 的注释） */
+async function reserveIds(req, res) {
+  const session = requireSession(req, res);
+  if (!session) return;
+  const body = await readBody(req);
+
+  const storeName = String((body && body.store) || '').trim();
+  const raw = Number(body && body.count);
+  const count = Math.max(1, Math.min(200, isNaN(raw) ? 1 : Math.floor(raw)));
+
+  try {
+    const result = await enqueue(function () {
+      return allocateIds(storeName, count, {
+        name: session.name,
+        openId: session.openId,
+        isAdmin: isAdminUser(session)
+      });
+    });
+    sendJson(req, res, 200, {
+      ok: true, store: result.store, ids: result.ids, from: result.from, to: result.to
+    });
+  } catch (err) {
+    sendJson(req, res, 400, { ok: false, message: (err && err.message) || '领号失败' });
+  }
+}
+
+async function reserveCodes(req, res) {
+  const session = requireSession(req, res);
+  if (!session) return;
+  const body = await readBody(req);
+
+  const prefix = String((body && body.prefix) || '').trim().toUpperCase();
+  if (!/^[A-Z]{1,4}$/.test(prefix)) {
+    sendJson(req, res, 400, { ok: false, message: '编码前缀不合法：' + (body && body.prefix) });
+    return;
+  }
+  // 一次最多领 200 个：号段是"用不完就浪费"的，别让人一次把几千个号占走
+  const raw = Number(body && body.count);
+  const count = Math.max(1, Math.min(200, isNaN(raw) ? 1 : Math.floor(raw)));
+
+  // 发号必须排队：两个请求同时进来时，靠这条队列保证不会拿到同一段
+  const result = await enqueue(function () {
+    return allocateCodes(prefix, count, {
+      name: session.name,
+      openId: session.openId,
+      isAdmin: isAdminUser(session)
+    });
+  });
+
+  sendJson(req, res, 200, {
+    ok: true,
+    prefix: result.prefix,
+    codes: result.codes,
+    from: result.from,
+    to: result.to
+  });
+}
+
 async function handleWrite(req, res) {
   const session = requireSession(req, res);
   if (!session) return;
@@ -1173,9 +1463,12 @@ const server = http.createServer(function (req, res) {
     if (pathname === '/api/me') return 'me';
     if (pathname === '/api/data') return 'data';
     if (pathname === '/api/write') return 'write';
+    if (pathname === '/api/reserve-codes') return 'reserveCodes';
+    if (pathname === '/api/reserve-ids') return 'reserveIds';
     if (pathname === '/api/jsapi-config') return 'jsapiConfig';
     if (pathname === '/api/upload') return 'upload';
     if (pathname === '/api/notify-test') return 'notifyTest';
+    if (pathname === '/api/notify-invoice') return 'notifyInvoice';
     if (/^\/api\/file\//.test(pathname)) return 'file';
     if (pathname === '/api/_diag') return 'diag';
     return null;
@@ -1250,12 +1543,23 @@ const server = http.createServer(function (req, res) {
     if (route === 'notifyTest') {
       return handleNotifyTest(req, res);
     }
+    if (route === 'notifyInvoice') {
+      return handleNotifyInvoice(req, res);
+    }
     if (route === 'file') {
       return handleFileDownload(req, res, pathname);
     }
     if (route === 'write') {
       if (req.method !== 'POST') { sendJson(req, res, 405, { ok: false, message: '请用 POST' }); return; }
       return handleWrite(req, res);
+    }
+    if (route === 'reserveIds') {
+      if (req.method !== 'POST') { sendJson(req, res, 405, { ok: false, message: '请用 POST' }); return; }
+      return reserveIds(req, res);
+    }
+    if (route === 'reserveCodes') {
+      if (req.method !== 'POST') { sendJson(req, res, 405, { ok: false, message: '请用 POST' }); return; }
+      return reserveCodes(req, res);
     }
   }).catch(function (err) {
     const conflict = !!(err && err.conflict);
@@ -1308,6 +1612,12 @@ process.on('unhandledRejection', function (reason) {
 module.exports = {
   server: server,
   applyOps: applyOps,
+  /** 第二十六轮：发号（测试要直调，所以导出；调用方需自行保证在 enqueue 里） */
+  allocateCodes: allocateCodes,
+  /** 第二十八轮：记录 id 也由服务端发（与编码同一套水位机制） */
+  allocateIds: allocateIds,
+  /** 串行队列：测试用来模拟"两个请求同时进来" */
+  enqueue: enqueue,
   loadAll: loadAll,
   computeSequences: computeSequences,
   issueSession: issueSession,
@@ -1316,9 +1626,22 @@ module.exports = {
   rememberUser: rememberUser,
   adminOpenIds: adminOpenIds,
   collectPurchaseEvents: collectPurchaseEvents,
+  /** 第十五轮：打包提交的通知合并逻辑（导出给测试直接调） */
+  dispatchPurchaseNotifications: dispatchPurchaseNotifications,
+  /** 第十五轮：提醒补齐发票的管理员接口（导出给测试直接调） */
+  handleNotifyInvoice: handleNotifyInvoice,
   STATE: STATE,
   CONFIG: CONFIG,
   mergeKnownUsersFromStore: mergeKnownUsersFromStore,
   /** 测试钩子：把内存里的登录名单清空，模拟"重新发布把本地文件清掉了" */
-  resetKnownUsers: function () { knownUsers = {}; }
+  resetKnownUsers: function () { knownUsers = {}; },
+  /**
+   * 测试钩子：**只在内存里**放几个登录身份，不碰 known-users.json。
+   *
+   * 为什么加这个：rememberUser 会把名单写盘，而 known-users.json 位于发布目录内，
+   * 发布工具不读 .gitignore —— 测试里编的假 openId（比如 ou_admin_test 映射到
+   * "陈亮"）会连同包上传到线上，**顶掉真实登录记录**（它的 at 时间戳更新），
+   * 结果是这个人再也收不到飞书提醒。测试要用假身份，就用这个纯内存的口子。
+   */
+  __setKnownUsers: function (map) { knownUsers = map || {}; }
 };

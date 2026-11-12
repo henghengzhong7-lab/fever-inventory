@@ -37,6 +37,15 @@ function fail(message) {
 }
 
 function readConfig() {
+  // 云端构建（Render 等）时仓库里没有 feishu.config.json（它带密钥，被 .gitignore 排除），
+  // 用环境变量提供 appId 就够了 —— 前端只需要 appId 和 apiBase。
+  if (process.env.FEVER_APP_ID) {
+    return {
+      appId: String(process.env.FEVER_APP_ID),
+      apiBase: String(process.env.FEVER_API_BASE || '').replace(/\/+$/, ''),
+      jssdkUrl: process.env.FEVER_JSSDK_URL || DEFAULT_JSSDK
+    };
+  }
   if (!fs.existsSync(configPath)) {
     if (fs.existsSync(examplePath)) {
       fs.copyFileSync(examplePath, configPath);

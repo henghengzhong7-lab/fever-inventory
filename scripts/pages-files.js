@@ -9,6 +9,7 @@ module.exports = [
   'js/stats.js',
   'js/ui.js',
   'js/qr.js',
+  'js/label-image.js',
   'js/views.js',
   'js/views-commerce.js',
   'js/actions.js',

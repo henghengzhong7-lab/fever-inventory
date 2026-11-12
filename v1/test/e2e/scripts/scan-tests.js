@@ -128,16 +128,48 @@
 
     /* ================= 入口页 ================= */
 
-    await E2E.record('导航里能找到「扫码查物」，入口页同时给出"扫"和"手工输入"两条路', async function () {
+    await E2E.record('导航里能找到「扫码 / 登记」，入口页同时给出"扫"和"手工输入"两条路', async function () {
       await E2E.goto('scan');
       var keys = Array.prototype.map.call(
         document.querySelectorAll('#main-nav .nav-item'),
         function (b) { return b.getAttribute('data-goto'); }
       );
-      E2E.ok(keys.indexOf('scan') !== -1, '导航里应有扫码查物入口，实际：' + keys.join('、'));
+      E2E.ok(keys.indexOf('scan') !== -1, '导航里应有扫码 / 登记入口，实际：' + keys.join('、'));
+      E2E.ok(keys.indexOf('desk') === -1,
+        '「出入库登记」已并入本页，导航里不该再有独立入口，实际：' + keys.join('、'));
       E2E.ok(q('#scan-start'), '应有「开始扫码」按钮');
       E2E.ok(q('#scan-code') && q('#scan-lookup'), '应能手工输入编码查询（开不了摄像头时的退路）');
       E2E.ok(!q('.scan-result'), '还没扫之前不该有结果卡');
+    });
+
+    await E2E.record('结果卡上直接能登记（原「出入库登记」已并进来）+ 能直接打印标签', async function () {
+      var items = (await DB.getAll('items')).filter(function (i) { return Number(i.inStockQty) > 0; });
+      var item = items[0];
+      E2E.ok(item, '应至少有一件在库的物品可试');
+      await E2E.goto('scan', { code: item.code });
+      await E2E.waitUntil('结果卡出来', function () { return q('.scan-result'); });
+
+      var acts = qa('[data-scan-act]').map(function (b) { return b.getAttribute('data-scan-act'); });
+      E2E.ok(acts.indexOf('lend') !== -1, '卡上应有「借用」');
+      E2E.ok(acts.indexOf('consume') !== -1,
+        '卡上应有「领用」—— 原来只在操作台里，合并后必须在这张卡上就有，实际：' + acts.join('、'));
+      E2E.ok(acts.indexOf('sendRepair') !== -1, '卡上应有「送修」');
+      E2E.ok(q('[data-print-item="' + item.code + '"]'),
+        '卡上应能直接打印标签（现场贴标签是最常做的事之一）');
+      E2E.ok(q('[data-goto-item="' + item.code + '"]'), '仍要保留去完整详情的入口');
+
+      // 点「领用」应直接弹出登记表单 —— 提交路径由后面「登记借用」那条用例覆盖，
+      // 这里**填了不提交**：领用会真的减库存，动了会影响后面几条用例的预期数字。
+      E2E.click(q('[data-scan-act="consume"]'));
+      var mask = await waitModal();
+      await E2E.waitUntil('领用弹窗就绪', function () { return mask.querySelector('[name="taker"]'); });
+      E2E.ok(!!mask.querySelector('[name="qty"]') && !!mask.querySelector('[name="operator"]'),
+        '领用要能填数量和操作人');
+      E2E.clickSelector('.modal-close', mask);
+      await waitModalGone();
+      var stillThere = await DB.get('items', item.code);
+      E2E.ok(Number(stillThere.inStockQty) === Number(item.inStockQty),
+        '没提交就不该动库存（这条用例只验证"能发起登记"）');
     });
 
     await E2E.record('「拍照 / 选图」要有直达按钮：最稳的那条兜底路不能只靠自动降级', async function () {

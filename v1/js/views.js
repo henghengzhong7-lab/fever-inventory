@@ -86,7 +86,7 @@
                   '<div class="page-actions">' +
                     '<button class="btn primary" data-act="new-purchase" type="button">新建采购申请</button>' +
                     '<button class="btn" data-act="new-inbound" type="button">直接入库</button>' +
-                    '<button class="btn" data-goto="desk" type="button">出入库登记</button>' +
+                    '<button class="btn" data-goto="scan" type="button">扫码 / 登记</button>' +
                   '</div>' +
                 '</div>' +
                 '<div class="cat-grid">' + cards + '</div>' +
@@ -132,6 +132,8 @@
 
   function category(params) {
     var catId = params.id;
+    // 从采购申请点进来时带着 purchaseRequestId：只看那一批到货生成的物品（第十五轮）
+    var onlyReq = params.purchaseRequestId ? String(params.purchaseRequestId) : '';
     return Stats.categorySummaries().then(function (summaries) {
       var s = categoryOf(summaries, catId);
       if (!s) {
@@ -154,6 +156,7 @@
           UI.esc(cat.name) + '需要注意（' + s.reminders.length + '）</h3></div>' +
           '<div class="panel-body">' + UI.alertBar(s.reminders.slice(0, 6)) + '</div></div>' : '') +
         (mod && mod.workspace ? mod.workspace(s, cat, new Date()) : '') +
+        '<div id="cat-only-req"></div>' +
         '<div class="panel">' +
           '<div class="panel-head"><h3 class="panel-title">筛选</h3>' +
             '<button class="btn small" data-act="reset-filter" type="button">清空条件</button></div>' +
@@ -222,6 +225,8 @@
         function render() {
           var all = s.items;
           var filtered = all.filter(function (item) {
+            // 「只看一批」优先：它由从上一条采购申请点进来的路由决定，不是筛选栏里的条件
+            if (onlyReq && String(item.purchaseRequestId || '') !== onlyReq) return false;
             var kw = state['f-keyword'];
             if (kw) {
               var hay = [item.code, item.name, item.spec, item.location].join(' ').toLowerCase();
@@ -247,7 +252,14 @@
             { label: '名称', render: function (i) {
                 return UI.esc(i.name) + (i.spec ? '<div class="hint">' + UI.esc(i.spec) + '</div>' : ''); } },
             { label: '身份', render: function (i) { return UI.identityPill(i.identityMode); } },
-            { label: '状态', render: function (i) { return UI.statusPill(i.status); } },
+            { label: '状态', render: function (i) {
+                // 标签打印记录（第二十轮）：只显示次数，不再有"待确认 / 确认已贴好"——
+                // 贴没贴好只有贴标签的人知道，让他多点一次确认纯属白事（需求方明确不要）。
+                return UI.statusPill(i.status) +
+                  (i.printCount
+                    ? '<div class="hint">标签已打印 ' + UI.esc(i.printCount) + ' 次</div>'
+                    : '');
+              } },
             { label: '在库', num: true, render: function (i) { return UI.esc(num(i.inStockQty)); } },
             { label: '借出', num: true, render: function (i) { return UI.esc(num(i.lentQty)); } },
             { label: '待修', num: true, render: function (i) { return UI.esc(num(i.repairQty)); } },
@@ -266,14 +278,37 @@
             emptyText: all.length ? '没有符合筛选条件的物品' : '这一类还没有物品，点右上角「新增物品」开始'
           });
           UI.qs('#cat-count', root).textContent = '显示 ' + filtered.length + ' / ' + all.length + ' 种';
+          paintOnlyReq(root);
           lastFiltered = filtered;
           syncBatchBar();
+        }
+
+        /** 「只看某一条采购申请生成的那批」的提示条。清掉之后整页恢复成该大类的全部 */
+        function paintOnlyReq(root) {
+          var box = root.querySelector('#cat-only-req');
+          if (!box) return;
+          box.innerHTML = onlyReq
+            ? '<div class="panel"><div class="panel-body">' +
+                '<div class="alert-item info">' +
+                  '<span class="who">只看一批</span>' +
+                  '<span>只显示采购申请 #' + UI.esc(onlyReq) + ' 到货时生成的物品。</span>' +
+                  '<button class="btn small ghost" data-clear-req="1" type="button">显示这一类的全部</button>' +
+                '</div>' +
+              '</div></div>'
+            : '';
         }
 
         root.addEventListener('input', function (e) {
           var name = e.target.getAttribute && e.target.getAttribute('name');
           if (!name) return;
           state[name] = String(e.target.value).trim();
+          render();
+        });
+        // 「只看一批」的清除按钮：清掉之后本页就是这个大类的全部物品
+        root.addEventListener('click', function (e) {
+          var clear = e.target.closest ? e.target.closest('[data-clear-req]') : null;
+          if (!clear) return;
+          onlyReq = '';
           render();
         });
         root.addEventListener('change', function (e) {
@@ -384,11 +419,25 @@
           '　·　' + UI.esc(cat ? cat.name : '未知大类') + '　·　' + UI.esc(item.spec || '无规格') + '</p></div>' +
           '<div class="page-actions">' +
             '<button class="btn" data-print-item="' + UI.esc(item.code) + '" type="button">打印标签</button>' +
-            '<button class="btn" data-goto="desk" type="button">出入库登记</button>' +
+            '<button class="btn" data-goto="scan" type="button">扫码 / 登记</button>' +
             '<button class="btn" data-act="edit-item" data-code="' + UI.esc(item.code) + '" type="button">编辑</button>' +
+            // 第十五轮：身份方式后期可改（同款共用 ⇄ 单独使用），
+            // 没有这条出路就只能删了重登，历史流水和已贴的标签会一起废掉
+            '<button class="btn" data-change-identity="' + UI.esc(item.code) + '" type="button">' +
+              ((item.identityMode || 'shared') === 'single' ? '改成同款共用' : '改成单独使用') + '</button>' +
             deleteBtn +
           '</div>' +
         '</div>' +
+        // 标签打印记录（第二十轮）：只有次数与最近时间。
+        // 打印次数记在这件物品上（不拆到每张标签）—— 同款共用的一件东西整体算。
+        // 原来的"待确认 / 确认已贴好"已按需求方要求删掉。
+        '<div class="panel no-print"><div class="panel-body">' +
+          (num(item.printCount)
+            ? '<div class="hint">标签已打印 <b>' + UI.esc(item.printCount) + '</b> 次' +
+              (item.lastPrintedAt ? '，最近一次 ' + UI.esc(UI.fmtTime(item.lastPrintedAt)) : '') +
+              '。再打印时会先问一句要不要重复打印。</div>'
+            : '<div class="hint">这件东西的标签还没打印过，打印之后这里会记下次数。</div>') +
+        '</div></div>' +
         '<div class="panel"><div class="panel-body">' +
           '<div class="detail-row">' +
             '<div class="detail-qr">' +
@@ -410,7 +459,19 @@
                 '<tr><th style="background:#fafbfe">存放位置</th><td>' + UI.esc(item.location || '-') + '</td></tr>' +
                 '<tr><th style="background:#fafbfe">安全库存</th><td>' +
                   UI.esc(item.safetyStock === null || item.safetyStock === undefined || item.safetyStock === '' ? '未设置' : item.safetyStock) + '</td></tr>' +
+                // 总价 / 购买时间都是选填（第十四周）：直接入库时可以留空，
+                // 这里显式写「未填」而不是 '-'，好区分"没记录"和"真的是 0"
+                '<tr><th style="background:#fafbfe">总价</th><td>' +
+                  (item.totalPrice === null || item.totalPrice === undefined || item.totalPrice === ''
+                    ? '<span class="hint">未填</span>'
+                    : '¥' + UI.esc(num(item.totalPrice).toFixed(2))) + '</td></tr>' +
+                '<tr><th style="background:#fafbfe">购买时间</th><td>' +
+                  (item.purchaseDate ? UI.esc(item.purchaseDate) : '<span class="hint">未填</span>') + '</td></tr>' +
                 '<tr><th style="background:#fafbfe">入库时间</th><td>' + UI.esc(UI.fmtTime(item.createdAt)) + '</td></tr>' +
+                // 添加人（第二十三轮）：谁把这件东西录进来的。
+                // 老数据没有这个键 → 显式写「未记录」，不拿入库时间或别的东西冒充。
+                '<tr><th style="background:#fafbfe">添加人</th><td>' +
+                  (item.addedBy ? UI.esc(item.addedBy) : '<span class="hint">未记录</span>') + '</td></tr>' +
                 '<tr><th style="background:#fafbfe">备注</th><td>' + UI.esc(item.remark || '-') + '</td></tr>' +
               '</tbody></table>' +
             '</div>' +
@@ -436,7 +497,7 @@
                       : (ctx.invoice
                           ? '<button class="btn small" data-goto-invoice="' + UI.esc(ctx.invoice.id) + '" type="button">' +
                             UI.esc(Rules.invoiceLabel(ctx.invoice)) + '</button> ' + UI.esc(ctx.invoice.supplier || '-') +
-                            '，金额 ' + UI.esc(ctx.invoice.amount) + ' 元，' + UI.esc(ctx.invoice.invoiceDate || '无日期')
+                            '，金额 ' + UI.esc(ctx.invoice.amount) + ' 元，' + UI.esc(ctx.invoice.invoiceDate || '未登记到货日期')
                           : '-')) + '</td></tr>' +
                 '</tbody></table>'
               : '<div class="empty">这件物品不是采购到货入库的</div>') +
@@ -477,7 +538,7 @@
     });
   }
 
-  /* ================= 扫码查物（第二版手机端） ================= */
+  /* ================= 扫码 / 登记（第十七轮并入了原「出入库登记」） ================= */
 
   /**
    * 扫码查物。
@@ -537,8 +598,9 @@
 
     var head =
       '<div class="page-head">' +
-        '<div><h1 class="page-title">扫码查物</h1>' +
-        '<p class="page-sub">扫物品标签上的二维码，立刻看到它在不在、放在哪、借给了谁。</p></div>' +
+        '<div><h1 class="page-title">扫码 / 登记</h1>' +
+        '<p class="page-sub">扫物品标签上的二维码（或手工输入编码）：立刻看到它在不在、放在哪、借给了谁，' +
+        '并直接在这里做借用 / 归还 / 领用 / 送修 / 修好回库 / 打印标签 —— 不用再切到别的页面。</p></div>' +
       '</div>';
 
     var panel =
@@ -560,7 +622,7 @@
         '<div class="hint scan-diag" id="scan-diag" hidden></div>' +
       '</div></div>';
 
-    var crumb = [{ label: '物资总览', goto: 'home' }, { label: '扫码查物' }];
+    var crumb = [{ label: '物资总览', goto: 'home' }, { label: '扫码 / 登记' }];
 
     function wire(root) {
       var input = root.querySelector('#scan-code');
@@ -652,13 +714,13 @@
     }
 
     if (!raw) {
-      return Promise.resolve({ title: '扫码查物', crumb: crumb, html: head + panel, onMount: wire });
+      return Promise.resolve({ title: '扫码 / 登记', crumb: crumb, html: head + panel, onMount: wire });
     }
 
     var code = Rules.parseQrPayload(raw);
     if (!code) {
       return Promise.resolve({
-        title: '扫码查物',
+        title: '扫码 / 登记',
         crumb: crumb,
         html: head + panel +
           '<div class="panel"><div class="panel-body">' +
@@ -677,13 +739,13 @@
 
       if (!ctx) {
         return {
-          title: '扫码查物',
+          title: '扫码 / 登记',
           crumb: crumb,
           html: head + panel +
             '<div class="panel"><div class="panel-body">' +
               '<div class="alert-item danger"><span class="who">没有找到 ' + UI.esc(code) + '</span>' +
               '<span>系统里没有这个编码的物品。可能是标签贴错了，或者这件物品已经被删除。' +
-              '如果确实还在，请到「出入库登记」里重新入库。</span></div>' +
+              '如果确实还在，请到它所属的大类里新增这件物品。</span></div>' +
             '</div></div>',
           onMount: wire
         };
@@ -700,8 +762,12 @@
       var qty = num(item.inStockQty) + lentQty + num(item.repairQty);
       var last = ctx.transactions.length ? ctx.transactions[0] : null;
 
+      // 快捷动作：就地把结果登记掉，登记完原地刷新这一页。
+      // 第十七轮把「出入库登记」并进来了 —— 扫码和登记本来就是一件事的两头
+      // （先认出这是哪件东西，再对它动手），所以动作全在这张卡上，不再切页。
       var actions = [];
       if (num(item.inStockQty) > 0) actions.push({ act: 'lend', label: '借用' });
+      if (num(item.inStockQty) > 0) actions.push({ act: 'consume', label: '领用' });
       if (num(item.lentQty) > 0) actions.push({ act: 'giveBack', label: '归还' });
       if (num(item.inStockQty) > 0) actions.push({ act: 'sendRepair', label: '送修' });
       if (num(item.repairQty) > 0) actions.push({ act: 'repairDone', label: '修好回库' });
@@ -773,6 +839,13 @@
               return '<button class="btn" type="button" data-scan-act="' + UI.esc(a.act) +
                 '" data-code="' + UI.esc(item.code) + '">' + UI.esc(a.label) + '</button>';
             }).join('') +
+            // 打印标签：贴新标签是现场最常做的事之一，放在这里不用先去物品详情
+            '<button class="btn" type="button" data-print-item="' + UI.esc(item.code) + '">打印标签</button>' +
+            // 只有采购来的物品才有发票可补传；不是采购来的就别画这个按钮
+            (ctx.invoice
+              ? '<button class="btn" type="button" data-upload-invoice="' + UI.esc(ctx.invoice.id) +
+                '">' + ((ctx.invoice.fileRef || ctx.invoice.fileData) ? '更换发票 PDF' : '补传发票') + '</button>'
+              : '') +
             '<button class="btn" type="button" data-goto-item="' + UI.esc(item.code) + '">完整详情</button>' +
           '</div>' +
         '</div></div>' +

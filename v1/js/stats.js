@@ -108,6 +108,59 @@
     });
   }
 
+  /**
+   * 一个批次（一次打包提交）的发票情况（第十六轮）。
+   *
+   * 纯函数，**批次页与采购申请列表共用这一套口径** —— 两处各算一遍的话，
+   * 迟早会出现"批次页说 3 张、列表页说 2 张"这种对不上的情况。
+   *
+   * 返回：
+   *   { invoiceIds,   这一批有附件的发票（可直接打包下载的那些）
+   *     total,        这一批登记过的发票总数
+   *     requests,     这一批的申请条数
+   *     arrived,      其中已到货的条数
+   *     missingNames, 已到货但还没上传发票的申请人（去重、保持出现顺序）
+   *     pendingNames, 还没到货的申请人 }
+   */
+  function batchInvoiceInfo(requests, invoices, batchId) {
+    var id = String(batchId === undefined || batchId === null ? '' : batchId);
+    var reqs = (requests || []).filter(function (r) { return String(r.batchId || '') === id; });
+    var invs = invoices || [];
+    var byReq = {};
+    invs.forEach(function (iv) { byReq[String(iv.purchaseRequestId)] = iv; });
+
+    var invoiceIds = [];
+    var total = 0;
+    var arrived = 0;
+    var missingNames = [];
+    var pendingNames = [];
+
+    function pushName(list, name) {
+      var v = String(name || '').trim();
+      if (v && list.indexOf(v) === -1) list.push(v);
+    }
+
+    reqs.forEach(function (r) {
+      var iv = byReq[String(r.id)];
+      if (iv) {
+        total += 1;
+        if (iv.fileRef || iv.fileData) invoiceIds.push(iv.id);
+        else if (r.status === 'arrived') pushName(missingNames, r.applicant);
+      }
+      if (r.status === 'arrived') arrived += 1;
+      else if (r.status !== 'canceled') pushName(pendingNames, r.applicant);
+    });
+
+    return {
+      invoiceIds: invoiceIds,
+      total: total,
+      requests: reqs.length,
+      arrived: arrived,
+      missingNames: missingNames,
+      pendingNames: pendingNames
+    };
+  }
+
   /** 某张发票对应的采购申请，找不到时明确告知已删除 */
   function requestOfInvoice(invoice) {
     if (!invoice || !invoice.purchaseRequestId) return Promise.resolve({ request: null, missing: false });
@@ -208,8 +261,12 @@
    * 兵种预算汇总。纯函数：只吃数据和参数，不读库、不碰 DOM，方便直接断言。
    *
    * 口径（和需求一起定下来的，改之前先想清楚为什么）：
-   *   · **已用 = 审批通过的申请金额之和**（approval 为已同意）。待审批的不占预算 ——
-   *     管理员点「同意」那一刻才扣。剩余 = 预算 − 已用。
+   *   · **已用（spent）= 审批通过的申请金额 + 直接入库的物品总价**。
+   *     第二十五轮之前只算申请，于是「直接入库时填了总价」的东西（很多小件都这么进来）
+   *     一分钱都没进预算 —— 使用者看到的就是"我明明花了钱，预算里没体现"。
+   *     两档分开存：`used`（已同意申请）与 `direct`（直接入库），`spent = used + direct`，
+   *     页面上显示 spent，明细查得到。
+   *   · 待审批的不占预算 —— 管理员点「同意」那一刻才扣。剩余 = 预算 − spent。
    *   · 已取消、已驳回的不算，钱不会花出去。
    *   · 另外单列「已到货实际」（登记发票的金额），它和「已用」的差额就是
    *     申请预算和真实花销的偏差，是给管理员看的，不参与剩余额度的计算。
@@ -222,7 +279,7 @@
    * @param {String} nowIso   当前时间，传进来是为了让测试可控
    * @param {Array} invoices  全部发票，用来算「已到货实际」
    */
-  function budgetSummary(requests, budgets, range, nowIso, invoices) {
+  function budgetSummary(requests, budgets, range, nowIso, invoices, items) {
     var map = budgets && typeof budgets === 'object' ? budgets : {};
     var start = rangeStart(range, nowIso);
 
@@ -241,7 +298,8 @@
         rows[troop] = {
           troop: troop,
           budget: num(map[troop]),
-          used: 0,        // 已同意（= 已用）
+          used: 0,        // 已同意申请的金额
+          direct: 0,      // 直接入库买的东西（物品总价，按物品上的兵种归集）
           pending: 0,     // 待审批（不占预算，只做参考）
           actual: 0,      // 已到货的实际发票金额
           requests: 0,
@@ -280,6 +338,16 @@
       }
     });
 
+    // 直接入库的物品：按它自己的兵种把钱记上（第二十五轮）
+    (items || []).forEach(function (it) {
+      if (!it) return;
+      if (start && String(it.createdAt || '') < start) return;
+      var price = num(it.totalPrice);
+      if (price <= 0) return;                       // 没填价、或填了 0 的，不算花销
+      var t = Rules.troopOf(it) || UNSPECIFIED;
+      rowOf(t).direct += price;
+    });
+
     var list = Object.keys(rows).map(function (k) { return rows[k]; });
     // 排序：有预算的先按兵种标准顺序，然后「未指定」永远垫底
     list.sort(function (a, b) {
@@ -293,28 +361,31 @@
     });
 
     list.forEach(function (r) {
-      r.remaining = r.budget - r.used;
-      r.usage = r.budget > 0 ? r.used / r.budget : null;
+      r.spent = r.used + r.direct;                  // 已用 = 申请 + 直接入库
+      r.remaining = r.budget - r.spent;
+      r.usage = r.budget > 0 ? r.spent / r.budget : null;
       // 只有"真的配了预算"的才算超支。「未指定」永远没有额度，
       // 把它算进超支数会把告警数量灌水，而它的问题另有提示。
-      r.over = r.troop !== UNSPECIFIED && r.budget > 0 && r.used > r.budget;
+      r.over = r.troop !== UNSPECIFIED && r.budget > 0 && r.spent > r.budget;
     });
 
     var total = {
-      budget: 0, used: 0, pending: 0, actual: 0,
+      budget: 0, used: 0, direct: 0, spent: 0, pending: 0, actual: 0,
       remaining: 0, over: 0, requests: 0, unspecifiedUsed: 0, unspecifiedCount: 0
     };
     list.forEach(function (r) {
       total.budget += r.budget;
       total.used += r.used;
+      total.direct += r.direct;
       total.pending += r.pending;
       total.actual += r.actual;
       total.requests += r.requests;
       if (r.over) total.over += 1;
-      if (r.troop === UNSPECIFIED) { total.unspecifiedUsed += r.used; total.unspecifiedCount += r.requests; }
+      if (r.troop === UNSPECIFIED) { total.unspecifiedUsed += r.spent; total.unspecifiedCount += r.requests; }
     });
-    total.remaining = total.budget - total.used;
-    total.usage = total.budget > 0 ? total.used / total.budget : null;
+    total.spent = total.used + total.direct;
+    total.remaining = total.budget - total.spent;
+    total.usage = total.budget > 0 ? total.spent / total.budget : null;
 
     return { rows: list, total: total, range: range || 'all', rangeName: RANGE_NAMES[range || 'all'] };
   }
@@ -330,22 +401,24 @@
    *           这是"已经消费的兵种的清单"落到每一笔的粒度。
    *   第三段 未消费预算 —— 还剩额度的兵种各剩多少（含分文未动的）。
    *
-   * 口径提醒：已用 = 已同意的申请金额；待审批不占预算；取消/驳回不算。
+   * 口径提醒：已用 = 已同意的申请金额 **+ 直接入库的物品总价**（第二十五轮）；
+   * 待审批不占预算；取消/驳回不算。
    */
-  function budgetCsv(requests, budgets, range, nowIso, invoices) {
-    var summary = budgetSummary(requests, budgets, range, nowIso, invoices);
+  function budgetCsv(requests, budgets, range, nowIso, invoices, items) {
+    var summary = budgetSummary(requests, budgets, range, nowIso, invoices, items);
     var parts = [];
 
     // —— 第一段：总表 ——
     parts.push(toCsv(
-      ['兵种', '预算额度', '已用（已同意）', '剩余', '使用率', '待审批金额', '待审批条数', '已到货实际', '申请数', '消费情况'],
+      // 多一列「直接入库」，把「已用」的构成摊开 —— 不然金额对不上会让人怀疑算错了
+      ['兵种', '预算额度', '已用', '其中·已同意申请', '其中·直接入库', '剩余', '使用率', '待审批金额', '待审批条数', '已到货实际', '申请数', '消费情况'],
       summary.rows.map(function (r) {
         var state;
         if (r.over) state = '超支';
-        else if (r.used > 0) state = '已消费';
+        else if (r.spent > 0) state = '已消费';
         else if (r.budget > 0) state = '未消费';
         else state = '无预算记录';
-        return [r.troop, money2(r.budget), money2(r.used), money2(r.remaining),
+        return [r.troop, money2(r.budget), money2(r.spent), money2(r.used), money2(r.direct), money2(r.remaining),
           r.usage === null ? '' : Math.round(r.usage * 100) + '%',
           money2(r.pending), r.pendingCount, money2(r.actual), r.requests, state];
       })
@@ -395,6 +468,7 @@
     filterTransactions: filterTransactions,
     itemsOfInvoice: itemsOfInvoice,
     requestOfInvoice: requestOfInvoice,
+    batchInvoiceInfo: batchInvoiceInfo,
     itemContext: itemContext,
     itemsCsv: itemsCsv,
     transactionsCsv: transactionsCsv,
@@ -402,7 +476,10 @@
     budgetCsv: budgetCsv,
     BUDGET_KEY: BUDGET_KEY,
     UNSPECIFIED: UNSPECIFIED,
-    RANGE_NAMES: RANGE_NAMES
+    RANGE_NAMES: RANGE_NAMES,
+    // 预算页要"点进申请数看是哪几次"，采购申请页据此把时间范围预置成同一个周期，
+    // 两边必须用同一套口径 —— 所以把 rangeStart 也导出去，别各写一份
+    rangeStart: rangeStart
   };
 
   if (typeof module !== 'undefined' && module.exports) {

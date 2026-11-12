@@ -92,6 +92,61 @@
     backend.requests.push({ url: target, method: options.method || 'GET' });
 
     return new Promise(function (resolve) {
+      // 领一段编码（第二十六轮）：水位存 settings 的 codeCounter:<前缀>，
+      // 与真实服务端同一套规则（没有水位行时从物品表扫最大号）
+      // 领一段记录 id（第二十八轮）：水位存 settings 的 idCounter:<表名>，
+      // 与真实服务端同一套规则（没有水位行时从该表现有最大 id 往后接）
+      if (target.indexOf('/api/reserve-ids') !== -1) {
+        const rb = JSON.parse(options.body || '{}');
+        const rStore = String(rb.store || '');
+        const rCount = Math.max(1, Math.min(200, Number(rb.count) || 1));
+        if (!AUTO[rStore]) {
+          resolve(response(400, { ok: false, message: '这张表不用自增编号：' + rStore }));
+
+          return;
+        }
+        const rKey = 'idCounter:' + rStore;
+        const rRow = backend.data.settings.filter(function (r) { return r.key === rKey; })[0];
+        let rBase = rRow && typeof rRow.value === 'number' ? rRow.value : 0;
+        if (!rRow) {
+          backend.data[rStore].forEach(function (r) {
+            const n = Number(r.id);
+            if (!isNaN(n) && n > rBase) rBase = n;
+          });
+        }
+        const rIds = [];
+        for (let ri = 1; ri <= rCount; ri += 1) rIds.push(rBase + ri);
+        if (rRow) { rRow.value = rBase + rCount; } else {
+          backend.data.settings.push({ key: rKey, value: rBase + rCount, updatedAt: new Date().toISOString() });
+        }
+          resolve(response(200, { ok: true, store: rStore, ids: rIds, from: rBase + 1, to: rBase + rCount }));
+
+        return;
+      }
+      if (target.indexOf('/api/reserve-codes') !== -1) {
+        var rb = JSON.parse(options.body || '{}');
+        var rPrefix = String(rb.prefix || '').toUpperCase();
+        var rCount = Math.max(1, Math.min(200, Number(rb.count) || 1));
+        var rKey = 'codeCounter:' + rPrefix;
+        var rRow = backend.data.settings.filter(function (r) { return r.key === rKey; })[0];
+        var rBase = rRow && typeof rRow.value === 'number' ? rRow.value : 0;
+        if (!rRow) {
+          backend.data.items.forEach(function (it) {
+            if (!it.code || it.code.indexOf(rPrefix + '-') !== 0) return;
+            var parsed = parseInt(it.code.slice(rPrefix.length + 1), 10);
+            if (!isNaN(parsed) && parsed > rBase) rBase = parsed;
+          });
+        }
+        var rCodes = [];
+        for (var ri = 1; ri <= rCount; ri += 1) {
+          rCodes.push(rPrefix + '-' + String(rBase + ri).padStart(4, '0'));
+        }
+        if (rRow) { rRow.value = rBase + rCount; } else {
+          backend.data.settings.push({ key: rKey, value: rBase + rCount, updatedAt: new Date().toISOString() });
+        }
+        resolve(response(200, { ok: true, prefix: rPrefix, codes: rCodes, from: rBase + 1, to: rBase + rCount }));
+        return;
+      }
       if (target.indexOf('/api/write') !== -1) {
         var body = JSON.parse(options.body);
         backend.writes.push(body.ops);

@@ -171,7 +171,7 @@ FEver战队物资管理\
 | invoiceNo | string | 发票号（必填） |
 | amount | number | 金额（必填） |
 | supplier | string | 供应商（必填） |
-| invoiceDate | string | 发票日期 |
+| invoiceDate | string | 到货日期（第十四周由「发票日期」改名，字段名不变以兼容历史数据） |
 | createdAt | string | 登记时间 |
 
 ### 4.5 关联字段与跳转

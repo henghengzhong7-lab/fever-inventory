@@ -146,7 +146,7 @@
         E2E.ok(Array.isArray(payload.data[name]), '备份应包含表 ' + name);
       });
       E2E.ok(payload.data.items.length === 1, '应包含导出时那 1 件物品');
-      E2E.ok(payload.data.categories.length === 4, '应包含四个大类配置');
+      E2E.ok(payload.data.categories.length === 6, '应包含六个大类配置');
       E2E.ok(payload.counts.items === 1, '统计里物品应为 1 条');
     });
 

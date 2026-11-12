@@ -16,3 +16,10 @@ server/uploads/
 
 # WorkBuddy 会话数据
 .workbuddy/
+.workbuddy-ai/
+
+# 数据备份：含队员姓名与借还记录，只留本地/网盘，绝不进库
+backup/
+
+# WorkBuddy 发布标记（平台元数据，不是项目内容）
+.wbapp_*.genie

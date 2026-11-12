@@ -11,12 +11,13 @@ module.exports.register = function (H, DB, Rules, Ops) {
     await Rules.initCategories();
   }
 
-  test('四个大类的统计与明细一致', async () => {
+  test('各大类的统计与明细一致', async () => {
     await fresh();
     await Ops.inbound({ categoryId: 'mechanical', name: '轴承', quantity: 10, identityMode: 'shared', operator: '张三', safetyStock: 20 });
     await Ops.inbound({ categoryId: 'vision', name: '相机', quantity: 2, identityMode: 'single', operator: '张三' });
     const sums = await Stats.categorySummaries();
-    assertEqual(sums.length, 4, '应有四个大类');
+    // 第十四周新增「宣传」「通用」后是六个；没有物品的大类统计为 0，不应缺项
+    assertEqual(sums.length, 6, '应有六个大类');
     const mech = sums.find((s) => s.category.id === 'mechanical');
     const vis = sums.find((s) => s.category.id === 'vision');
     assertEqual(mech.totalQty, 10);
@@ -24,6 +25,8 @@ module.exports.register = function (H, DB, Rules, Ops) {
     assertEqual(vis.totalQty, 2);
     assertEqual(vis.itemKinds, 2, '单独建身份 2 件是两个身份');
     assertEqual(mech.lowStock, 1, '在库 10 低于安全库存 20，应算低库存');
+    const empty = sums.find((s) => s.category.id === 'promo');
+    assertEqual(empty.totalQty, 0, '没有物品的新大类应正常返回 0，而不是缺项或报错');
   });
 
   test('大类统计随出入库实时变化', async () => {
@@ -45,7 +48,8 @@ module.exports.register = function (H, DB, Rules, Ops) {
     });
     const sums = await Stats.categorySummaries(new Date('2026-09-21T10:00:00+08:00'));
     const vis = sums.find((s) => s.category.id === 'vision');
-    assert(vis.reminders.some((r) => r.kind === 'calibration'), '视觉类应带出标定提醒');
+    // 第二十四轮：视觉类不做标定，就算物品上还留着 lastCalibrationDate，也不该再提醒
+    assert(!vis.reminders.some((r) => r.kind === 'calibration'), '视觉类不该再带出标定提醒');
     const mech = sums.find((s) => s.category.id === 'mechanical');
     assertEqual(mech.reminders.length, 0, '机械类没有对应数据时不应有提醒');
   });

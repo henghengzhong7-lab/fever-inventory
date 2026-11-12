@@ -14,6 +14,7 @@
     "perf:write": "node perf-write.js",
     "test:session": "node test-session.js",
     "test:parallel": "node test-parallel.js",
+    "test:reserve": "node test-reserve.js",
     "test:admin": "node test-admin.js",
     "test:e2e": "node test-e2e.js",
     "lint": "node --check index.js && node --check init-base.js && node --check check.js && node --check smoke.js && node --check probe-auth.js && node --check perf-probe.js && node --check perf-write.js && node --check test-e2e.js && node --check test-session.js && node --check test-parallel.js && node --check test-admin.js && node --check lib/feishu.js && node --check lib/store.js && node --check lib/session.js"

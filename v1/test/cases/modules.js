@@ -104,22 +104,7 @@ module.exports.register = function (H, DB, Rules) {
     assertEqual(rows.find((r) => r.code === 'EL-0002').due, false, '刚换过不该到期');
   });
 
-  /* ---------- 视觉：标定看板 + 配套关系 ---------- */
-
-  test('视觉：标定超过周期标成「需重新标定」并排最前', async () => {
-    const vision = { reminders: { calibrationDays: 90 } };
-    const rows = mods.vision.calibrationBoard([
-      { code: 'VS-0001', name: '老相机', identityMode: 'single', extra: { lastCalibrationDate: '2026-01-01', calibrationStatus: '已标定' } },
-      { code: 'VS-0002', name: '新相机', identityMode: 'single', extra: { lastCalibrationDate: '2026-09-10', calibrationStatus: '已标定' } },
-      { code: 'VS-0003', name: '没标过的', identityMode: 'single', extra: {} }
-    ], vision, today);
-    assertEqual(rows[0].overdue, true, '超期的应排最前');
-    assertEqual(rows[0].status, '需重新标定', '超期应把状态改写成需重新标定');
-    const fresh = rows.find((r) => r.code === 'VS-0002');
-    assertEqual(fresh.overdue, false);
-    assertEqual(fresh.status, '已标定', '没过期不该改写状态');
-    assertEqual(rows.find((r) => r.code === 'VS-0003').overdue, true, '从未标定算超期');
-  });
+  /* ---------- 视觉：配套关系（标定看板第二十四轮已删） ---------- */
 
   test('视觉：配套关系能对上库里的那台设备，对不上也如实标出', async () => {
     const pairs = mods.vision.pairing([
@@ -200,7 +185,9 @@ module.exports.register = function (H, DB, Rules) {
     assert(outs.mechanical.includes('装配位置索引'), '机械应有装配位置索引');
     assert(outs.electronic.includes('安全等级警示'), '电控应有安全等级警示');
     assert(outs.electronic.includes('电池健康'), '电控应有电池健康');
-    assert(outs.vision.includes('标定看板'), '视觉应有标定看板');
+    // 第二十四轮：视觉类不做标定，整套标定看板已删
+    assert(!outs.vision.includes('标定看板'), '视觉不该再有标定看板');
+    assert(!outs.vision.includes('需重新标定'), '视觉不该再出现标定状态');
     assert(outs.vision.includes('镜头与相机配套'), '视觉应有配套关系');
     assert(outs.hardware.includes('工具校准检定'), '硬件应有工具校准');
     assert(outs.hardware.includes('耗材余量'), '硬件应有耗材余量');
@@ -218,7 +205,66 @@ module.exports.register = function (H, DB, Rules) {
     const html = mods.vision.workspace(
       { category: cat, items, itemKinds: 2, inStockQty: 2, lentQty: 0, reminders: [], lowStock: 0 },
       cat, today);
-    assert(html.includes('data-goto-item="VS-0001"'), '标定看板里的编码应可跳转');
+    assert(html.includes('data-goto-item="VS-0001"'), '配套关系里的编码应可跳转');
     assert(html.includes('data-goto-item="VS-0002"'), '配套关系里的编码应可跳转');
+  });
+
+  /* ---------- 第二十四轮：视觉类不做标定 ---------- */
+
+  test('视觉类不做标定：提醒周期为 0，专属字段里没有标定状态', async () => {
+    await Rules.clearAll();
+    await Rules.initCategories();
+    const vis = await DB.get('categories', 'vision');
+    assertEqual(vis.reminders.calibrationDays, 0, '视觉类的标定周期应为 0（提醒逻辑是「>0 才提醒」）');
+    assert(!(vis.extraFields || []).some((f) => f.key === 'calibrationStatus'),
+      '专属字段里不该再有「标定状态」');
+    // 亲缘字段别被误删
+    assert((vis.extraFields || []).some((f) => f.key === 'lensMount'), '镜头接口要留着');
+    assert((vis.extraFields || []).some((f) => f.key === 'cameraPair'), '配套相机要留着');
+    // 别的大类不受影响
+    const hw = await DB.get('categories', 'hardware');
+    assertEqual(hw.reminders.toolCalibrationDays, 180, '硬件的工具校准周期不该被这次改动波及');
+  });
+
+  test('老库能被定向修正：只动视觉类那两个键，别的一律不碰', async () => {
+    await Rules.clearAll();
+    const now = DB.nowIso();
+    // 造一个"老库"里的视觉类：90 天周期 + 带标定状态字段 + 使用者改过的描述与排序
+    await DB.add('categories', {
+      id: 'vision', name: '视觉（我们自己改的名字）', icon: '◎', prefix: 'VS',
+      sortOrder: 99, description: '改过的描述',
+      defaultIdentityMode: 'single', searchFields: ['lensMount', 'cameraPair'],
+      reminders: { calibrationDays: 90, toolCalibrationDays: 0, spareCycleDays: 365 },
+      extraFields: [
+        { key: 'resolution', label: '分辨率', type: 'text' },
+        { key: 'calibrationStatus', label: '标定状态', type: 'select', options: ['未标定', '已标定'] },
+        { key: 'lastCalibrationDate', label: '最近标定日期', type: 'date' }
+      ],
+      createdAt: now, updatedAt: now
+    });
+
+    await Rules.initCategories();
+    const fixed = await DB.get('categories', 'vision');
+    assertEqual(fixed.reminders.calibrationDays, 0, '老库的标定周期要被归零');
+    assert(!(fixed.extraFields || []).some((f) => f.key === 'calibrationStatus'), '标定状态字段要摘掉');
+    // 这几条是"别的一律不碰"的证据
+    assertEqual(fixed.name, '视觉（我们自己改的名字）', '使用者改过的名字不许动');
+    assertEqual(fixed.description, '改过的描述', '改过的描述不许动');
+    assertEqual(fixed.sortOrder, 99, '改过的排序不许动');
+    assertEqual(fixed.reminders.spareCycleDays, 365, '别的提醒周期不许动');
+    assert((fixed.extraFields || []).some((f) => f.key === 'lastCalibrationDate'),
+      '物品上那个日期字段不主动摘（数据删了不可恢复，留着只是不显示）');
+  });
+
+  test('定向修正是幂等的：第二遍不该再写库', async () => {
+    await Rules.clearAll();
+    await Rules.initCategories();
+    const first = await DB.get('categories', 'vision');
+    const stamp = first.updatedAt;
+    await new Promise((r) => setTimeout(r, 5));   // 让 nowIso 有机会变化，避免假绿
+    await Rules.initCategories();
+    const second = await DB.get('categories', 'vision');
+    assertEqual(second.updatedAt, stamp, '已经是新样子就不该再写一次（否则每次启动都写库）');
+    assertEqual(second.reminders.calibrationDays, 0);
   });
 };

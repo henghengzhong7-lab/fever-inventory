@@ -162,7 +162,9 @@
     var init = { method: (options && options.method) || 'GET', headers: headers };
     if (options && options.body !== undefined) init.body = options.body;
     // keepalive：写请求带上它，队员点完确认立刻切走/关页面，请求也照样发得出去。
-    // 正文很小（一条 op 几百字节），远在 keepalive 的 64KB 上限之内。
+    // ⚠️ 但调用方必须先量体型：浏览器只允许 keepalive 的正文 ≤64KB（多个在飞
+    // 请求共享这 64KB），超限会**直接拒发**而不是降级。判定见 flushNow 里的
+    // KEEPALIVE_MAX_BYTES —— 大写入（如带着「删除记录」的删除）不要带它。
     if (options && options.keepalive) init.keepalive = true;
 
     return global.fetch(apiBase() + path, init).then(function (res) {
@@ -233,6 +235,7 @@
         counters[name] = !isNaN(seq) && seq > 0 ? seq : maxId(name) + 1;
       });
       lastSyncedAt = Date.now();
+      prewarmIds();   // 第二十八轮：顺手把记录号领一段，第一次写入不用等
       return null;
     });
   }
@@ -346,6 +349,32 @@
     }, delay);
   }
 
+  /**
+   * keepalive 请求的正文上限。
+   *
+   * 浏览器的规矩：带 keepalive 的请求正文**上限 64KB**，而且同一时刻在飞的
+   * 多个 keepalive 请求**共享**这 64KB。超了不会"降级"，而是**整个请求被拒**
+   * （TypeError: Failed to fetch）——界面看到的就是"连不上服务器，请检查网络后重试"。
+   *
+   * 这里取一半：一次大的加一次小的在飞，也不至于越过浏览器的红线。
+   */
+  var KEEPALIVE_MAX_BYTES = 32 * 1024;
+
+  /**
+   * 正文的 UTF-8 字节数。不能直接用 text.length —— 一个汉字在 JS 里算 1、
+   * 在线上算 3 字节，拿 length 比会把明显超限的请求误判成"还能用 keepalive"。
+   * TextEncoder 所有目标环境都有；兜底那条宁可算大（算大了只是不用 keepalive，
+   * 不会因此失败）。
+   */
+  function payloadBytes(text) {
+    try {
+      if (global.TextEncoder) return new global.TextEncoder().encode(text).length;
+      return encodeURIComponent(text).replace(/%[0-9A-Fa-f]{2}/g, '_').length;
+    } catch (err) {
+      return text.length * 3;
+    }
+  }
+
   function flushNow() {
     if (flushTimer) {
       global.clearTimeout(flushTimer);
@@ -364,14 +393,25 @@
       waiters.push.apply(waiters, c.waiters);
     });
 
+    var payload = JSON.stringify({ ops: ops });
+    // keepalive 只发给小请求。
+    //
+    // ⚠️ 为什么必须挑体型：浏览器给 keepalive 请求定了 64KB 的正文上限（多个
+    // 在飞请求共享这 64KB），**超限不降级、直接拒发**，界面收到"连不上服务器"。
+    // 删除物品就栽在这——它的写入带着「删除记录」，每票存一条整条物品快照，
+    // 攒到一百多票时正文就过了 66KB，从那以后每次删除都必失败，物品删不掉。
+    // 大请求改走普通 fetch：照样发得出去，代价只是"点完确认瞬间关页面"这一下
+    // 可能被打断（那种请求本来就要等服务器确认，使用者也在看着屏幕）。
+    var useKeepalive = payloadBytes(payload) <= KEEPALIVE_MAX_BYTES;
+
     inFlight += 1;
     inFlightOps += ops.length;
     updatePill();
 
     api('/api/write', {
       method: 'POST',
-      body: JSON.stringify({ ops: ops }),
-      keepalive: true
+      body: payload,
+      keepalive: useKeepalive
     }).then(function (body) {
       inFlight -= 1;
       inFlightOps -= ops.length;
@@ -579,24 +619,30 @@
         },
         add: function (store, data) {
           var row = clone(data);
-          var key = allocateKey(store, row);
-          if (indexOfKey(store, key) !== -1) {
-            var dup = new Error('已经有一条主键相同的记录：' + key);
-            dup.name = 'ConstraintError';
-            throw dup;
-          }
-          list(store).push(row);
-          ops.push({ type: 'add', store: store, data: row });
-          return Promise.resolve(AUTO_ID[store] ? Number(row.id) : key);
+          // 自增 id 由服务端发（第二十八轮）：先从号池取一个，再定主键
+          return ensureRowId(store, row).then(function () {
+            var key = allocateKey(store, row);
+            if (indexOfKey(store, key) !== -1) {
+              var dup = new Error('已经有一条主键相同的记录：' + key);
+              dup.name = 'ConstraintError';
+              throw dup;
+            }
+            list(store).push(row);
+            ops.push({ type: 'add', store: store, data: row });
+            return AUTO_ID[store] ? Number(row.id) : key;
+          });
         },
         put: function (store, data) {
           var row = clone(data);
-          var key = allocateKey(store, row);
-          var index = indexOfKey(store, key);
-          if (index === -1) list(store).push(row);
-          else list(store)[index] = row;
-          ops.push({ type: 'put', store: store, data: row });
-          return Promise.resolve(AUTO_ID[store] ? Number(row.id) : key);
+          // put 一个不存在的键等于插入 —— 同样要先有 id
+          return ensureRowId(store, row).then(function () {
+            var key = allocateKey(store, row);
+            var index = indexOfKey(store, key);
+            if (index === -1) list(store).push(row);
+            else list(store)[index] = row;
+            ops.push({ type: 'put', store: store, data: row });
+            return AUTO_ID[store] ? Number(row.id) : key;
+          });
         },
         remove: function (store, key) {
           var index = indexOfKey(store, key);
@@ -647,7 +693,124 @@
     });
   }
 
-  /** 给一条新记录定主键：自增表编号由本地先占一个，服务端会校验有没有撞号 */
+  /* ---------- 记录 id 也由服务端发（第二十八轮） ---------- */
+
+  /**
+   * id 号池：表名 → 一批已经领回来的记录号，逐次发放，用完再领。
+   *
+   * 为什么连 id 也要领：申请号 / 发票号 / 流水号原来是**本机计数器**分配的
+   * （见下面 allocateKey 里的 counters），而**每次添加物品都会写一条入库流水** ——
+   * 两个人同时添加，几乎必然分到同一个流水 id，服务端只能 409 拒绝
+   * （「编号 N 已被占用」）。上一轮只把物品编码改成服务端发号，漏了 id 这一半。
+   *
+   * 段大小取 5（不是编码那边的 20）：记录号是**显示给使用者看的**（申请 #12），
+   * 一次领 20 个会让号一下跳过一大段，看着奇怪；5 个只跳几个，代价可接受。
+   * 池子同样放内存：同设备两个标签页共用 localStorage 会从同一段取号。
+   */
+  var ID_RESERVE_CHUNK = 10;
+  /** 池里少于这么多就顺手补满（补是后台的，不挡使用者操作） */
+  var ID_POOL_LOW = 3;
+  /** 补池节流：距上次补不足这么久就不再补（死循环的最后一道闸） */
+  var ID_FILL_COOLDOWN = 30000;
+  var idPool = {};
+  /** 正在领号的 Promise（同一张表别重复领） */
+  var idFilling = {};
+  /** 每张表上次领号的时间（用于节流） */
+  var idFilledAt = {};
+
+/** 号池里这个号是不是已经被本地镜像里的记录占了 */
+  function idTaken(store, id) {
+    return list(store).some(function (r) { return Number(r.id) === Number(id); });
+  }
+
+  /**
+   * 补池的**节流**：距上次补不足 ID_FILL_COOLDOWN 毫秒就不再补。
+   *
+   * ⚠️ 这一条是"死循环"的最后一道闸：只要出现过"领来的号全被占用"，
+   * 没有节流就会变成"取号 → 发现池空 → 补池 → 号又被占用 → 再补……"
+   * 每一步都是一次 HTTP 请求，单人操作也会被拖垮。
+   */
+  function scheduleFill(store) {
+    var now = Date.now();
+    if (idFilledAt[store] && now - idFilledAt[store] < ID_FILL_COOLDOWN) return;
+    idFilledAt[store] = now;
+    fillIdPool(store).catch(function () { /* 补池失败不影响主流程 */ });
+  }
+
+  /** 真去服务端领一段号 —— **全文件只有这一处**发领号请求 */
+  function fetchIds(store, count) {
+    if (idFilling[store]) return idFilling[store];   // 同一张表别重复领
+    idFilling[store] = api('/api/reserve-ids', {
+      method: 'POST',
+      body: JSON.stringify({ store: store, count: Math.max(count, ID_RESERVE_CHUNK) })
+    }).then(function (body) {
+      var ids = (body && body.ids) || [];
+      if (!ids.length) throw new Error('服务端没有发下来编号，请重试');
+      return ids;
+    }).then(function (ids) {
+      delete idFilling[store];
+      return ids;
+    }, function (err) {
+      delete idFilling[store];
+      throw err;
+    });
+    return idFilling[store];
+  }
+
+  /**
+   * 取 count 个号。
+   *
+   * 池里有就从池里取（**零网络**）；池空时**最多领一次**。
+   *
+   * ⚠️ 三个必须守住的地方（第二十九轮各踩一个）：
+   *   ① **不递归**。领来的号若已被本地占用就丢掉，剩下的不够也**不再领**——
+   *      上一轮写成 `return takeIds(store, count)`，一旦池里的号与本地镜像重叠
+   *      （改之前本机计数器造出来的老数据就是这样），就会无限递归、无限发请求。
+   *   ② **过滤只在领号时做一次**，不是每次取号都做（否则每步都扫全表，
+   *      而且会出现"取走一个、发现下一个也被占"的连锁）。
+   *   ③ **补池要节流**（scheduleFill），不给死循环留出口。
+   */
+  function takeIds(store, count) {
+    var n = Math.max(1, count || 1);
+    var pool = idPool[store] || [];
+    if (pool.length) {
+      var out = pool.slice(0, n);
+      idPool[store] = pool.slice(n);
+      if (idPool[store].length < ID_POOL_LOW) scheduleFill(store);
+      return Promise.resolve(out);
+    }
+    return fetchIds(store, n).then(function (ids) {
+      var usable = ids.filter(function (id) { return !idTaken(store, id); });
+      if (!usable.length) throw new Error('服务端发下来的编号已被占用，请点左下角同步一次');
+      idPool[store] = usable.slice(n);
+      if (idPool[store].length < ID_POOL_LOW) scheduleFill(store);
+      return usable.slice(0, n);
+    });
+  }
+
+  /** 自增表的记录还没有编号 → 从号池取一个（池空时会触发一次领号） */
+  function ensureRowId(store, row) {
+    if (!AUTO_ID[store]) return Promise.resolve();
+    var id = Number(row && row.id);
+    if (!isNaN(id) && id > 0) return Promise.resolve();
+    return takeIds(store, 1).then(function (ids) { row.id = ids[0]; });
+  }
+
+  /** 把某张表的号池补满（**纯补充，不消费**） */
+  function fillIdPool(store) {
+    if ((idPool[store] || []).length >= ID_POOL_LOW) return Promise.resolve();
+    return fetchIds(store, ID_RESERVE_CHUNK).then(function (ids) {
+      var fresh = ids.filter(function (id) { return !idTaken(store, id); });
+      if (fresh.length) idPool[store] = (idPool[store] || []).concat(fresh);
+    });
+  }
+
+  /** 预热：三张自增表的号池不够就补（失败静默，真到写入时还会再领一次） */
+  function prewarmIds() {
+    Object.keys(AUTO_ID).forEach(function (name) { scheduleFill(name); });
+  }
+  /** 给一条新记录定主键。自增表的 id 上面已经领好了；下面的兜底只在极少数
+   *  没走 add/put 的路径上才会用到（正常路径不会再自己造号）。 */
   function allocateKey(store, row) {
     var name = KEY_PATH[store];
     if (AUTO_ID[store]) {
@@ -694,6 +857,58 @@
   function dbCount(storeName) {
     return runTx(storeName, 'readonly', function (T) { return T.count(storeName); });
   }
+
+  /* ==================== 编码发放（第二十六轮） ==================== */
+
+  /**
+   * 编码号池：一次向服务端领一段，逐次发放，用完再领。
+   *
+   * 为什么改成这样：原来前端各自在本机算号（读本地镜像里的计数器），
+   * 两个人同时添加物品时都会算出 MC-0007 —— 服务端只能拒掉后一个（409），
+   * 界面弹"编号已被占用…请重新操作一次"并重拉全量数据（线上约 1.4 秒）。
+   * 使用者感受到的就是「编号被占用 + 卡一下 + 得重来一遍」。
+   *
+   * 现在号由**服务端**发（它所有写都过一条串行队列，两个请求不可能拿到同一段），
+   * 前端一次领一段存着用：正常添加入库**完全不碰网络**，也不会再撞号。
+   *
+   * 代价：编码**会跳号**（这段没用完就作废，下次从下一段接着发）。
+   * 编码只是标识，跳号不影响扫码、统计与标签。
+   *
+   * 池子放**内存**、不放 localStorage：同一台设备开两个标签页时，
+   * 共用一份 localStorage 会让两个页面从同一段里号 —— 那正是要避免的事。
+   */
+  var RESERVE_CHUNK = 20;
+  var codePool = {};
+
+  /** 池子空了就去服务端领一段（至少够这次要的） */
+  function refillCodes(prefix, need) {
+    var want = Math.max(need, RESERVE_CHUNK);
+    return api('/api/reserve-codes', {
+      method: 'POST',
+      body: JSON.stringify({ prefix: prefix, count: want })
+    }).then(function (body) {
+      var codes = (body && body.codes) || [];
+      if (!codes.length) throw new Error('服务端没有发下来编码，请重试');
+      codePool[prefix] = codes.slice();
+      return codes.length;
+    });
+  }
+
+  /**
+   * 取 count 个连号：池子里够就直接发（0 等待），不够就领一段再发。
+   * 领号失败**照实抛错** —— 宁可不入库，也绝不瞎编一个号（那必然撞）。
+   */
+  function nextCodes(prefix, count) {
+    var pre = String(prefix || 'IT');
+    var n = Math.max(1, Number(count) || 1);
+    var pool = codePool[pre] || [];
+    if (pool.length >= n) {
+      codePool[pre] = pool.slice(n);
+      return Promise.resolve(pool.slice(0, n));
+    }
+    return refillCodes(pre, n).then(function () { return nextCodes(pre, n); });
+  }
+
 
   function getSetting(key, fallback) {
     return dbGet('settings', key).then(function (row) {
@@ -822,6 +1037,7 @@
     getByIndex: dbGetByIndex,
     remove: dbDelete,
     count: dbCount,
+    nextCodes: nextCodes,
     getSetting: getSetting,
     setSetting: setSetting,
     /**
@@ -840,6 +1056,17 @@
      */
     notifyTest: function () {
       return api('/api/notify-test', { method: 'POST' });
+    },
+    /**
+     * 提醒申请人补发票（第十五轮）。服务端拿姓名去登录名单里认 openId，
+     * **认不出来的会如实回报**（results 里 sent:false / reason:'not_found'）——
+     * 界面要照着说"某某还没登录过应用，提醒发不出去"，不能一概显示"已提醒"。
+     */
+    notifyInvoice: function (names, batchId) {
+      return api('/api/notify-invoice', {
+        method: 'POST',
+        body: JSON.stringify({ names: names || [], batchId: batchId || '' })
+      });
     },
     /* 飞书共享版特有的能力，界面不用，但排查问题时有用 */
     reload: reload,

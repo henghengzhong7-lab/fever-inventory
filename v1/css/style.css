@@ -450,13 +450,33 @@ table.grid td.pick input { width: 15px; height: 15px; cursor: pointer; }
 }
 
 @media print {
-  .topbar, .crumb, .no-print, .toast-root, .modal-mask { display: none !important; }
+  /* 打印只留标签：先**全部藏起来**，再把标签纸单独放出来。
+     原来这里是"逐个 class 藏"（.topbar / .crumb / .no-print …），
+     看着够用，其实漏一个就多打一块 —— 页面上任何新加的块都会被顺手打印出来。
+     反过来做（先全藏、只放标签）就不漏了。 */
+  body * { visibility: hidden !important; }
+  #label-sheet, #label-sheet * { visibility: visible !important; }
+  #label-sheet {
+    position: absolute !important;
+    left: 0; top: 0; width: 100% !important;
+  }
+  #label-sheet .panel { border: 0; box-shadow: none; margin: 0; }
+  #label-sheet .panel-body { padding: 0; }
+
+  /* 只在打印时出现的一行说明：打出来的纸上写清"这是哪几张"，
+     一眼就能核对是不是自己选的那一批（屏幕上不显示） */
+  .print-only { display: block !important; }
+  .print-only .print-line { font-size: 12px; color: #444; margin-bottom: 6px; }
+
   body { background: #fff; }
   .view-root { padding: 0; max-width: none; }
   .panel { border: 0; box-shadow: none; margin: 0; }
   .panel-head, .panel-body { padding: 0; border: 0; }
   .label-card { border: 1px solid #d6dbe6; }
 }
+
+/* 屏幕上看不到，只有打印时才有 */
+.print-only { display: none; }
 
 /* ---------- 发票 PDF 拖拽区（第十三轮） ----------
    拖进来时高亮，让"松手就交给我"这件事看得见；

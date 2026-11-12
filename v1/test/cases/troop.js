@@ -6,6 +6,8 @@
  */
 'use strict';
 
+const Stats = require('../../js/stats.js');
+
 module.exports.register = function (H, DB, Rules, Ops) {
   const { test, assert, assertEqual, assertDeepEqual, assertRejects } = H;
 
@@ -25,12 +27,77 @@ module.exports.register = function (H, DB, Rules, Ops) {
     return Object.assign({ id }, row);
   }
 
-  test('兵种选项是需求方给的这 9 个，且「其他」排在最后', async () => {
+  test('兵种取值：步兵细分三类 + 第二十二轮三个车型 + 第二十五轮「英雄 / 小轮腿」', async () => {
     assertDeepEqual(Rules.TROOPS,
-      ['重装', '步兵', '哨兵', '飞镖', '无人机', '雷达', '前哨战', '能量机关', '其他']);
+      ['重装', '步兵', '轮腿步兵', '过洞步兵', '可折叠步兵', '小轮腿',
+        // 第二十二轮按需求方要求新增（纯新增，旧的都保留）
+        '舵轮机器人', '老步兵机器人', '新步兵机器人',
+        // 第二十五轮再加两个（同样是纯新增）
+        '英雄',
+        '哨兵', '飞镖', '无人机', '雷达', '前哨战', '能量机关', '其他']);
     assertEqual(Rules.TROOPS[Rules.TROOPS.length - 1], '其他', '「其他」必须是最后一个（它是兜底项，不该被误选）');
-    assertEqual(Rules.TROOPS.length, 9);
-    assertEqual(new Set(Rules.TROOPS).size, 9, '兵种不能有重复项');
+    assertEqual(new Set(Rules.TROOPS).size, Rules.TROOPS.length, '兵种不能有重复项');
+  });
+
+  test('表单选项里没有历史值「步兵」，但它仍是合法取值', async () => {
+    // 这是本轮改动的核心权衡：步兵细分成三类之后，
+    // 「步兵」不再给用户选（TROOP_OPTIONS），但仍是合法取值（TROOPS）——
+    // 因为它已经是老数据的预算归类键，直接删掉会让那些钱静默改归属。
+    assertEqual(Rules.TROOP_OPTIONS.indexOf('步兵'), -1, '下拉框里不应再出现「步兵」');
+    assertEqual(Rules.TROOP_OPTIONS.length, Rules.TROOPS.length - Rules.TROOP_LEGACY.length);
+    ['轮腿步兵', '过洞步兵', '可折叠步兵'].forEach((t) => {
+      assertEqual(Rules.TROOP_OPTIONS.indexOf(t) !== -1, true, '下拉框里应有「' + t + '」');
+    });
+    assertEqual(Rules.TROOP_OPTIONS[Rules.TROOP_OPTIONS.length - 1], '其他', '「其他」仍应排最后');
+  });
+
+  test('老数据里的「步兵」原样保留，不被归到「其他」', async () => {
+    // 归到「其他」就等于把这笔钱从「步兵」预算里搬走 —— 而且是静默的
+    assertEqual(Rules.normalizeTroop('步兵'), '步兵');
+    assertEqual(Rules.troopOf({ troop: '步兵' }), '步兵');
+  });
+
+  test('编辑老记录时，历史兵种会被补进下拉选项（否则一保存就被改掉）', async () => {
+    const legacy = Rules.troopChoices('步兵');
+    assertEqual(legacy.indexOf('步兵') !== -1, true, '编辑一条「步兵」的老记录时，选项里必须还有「步兵」');
+    assertEqual(legacy.length, Rules.TROOP_OPTIONS.length + 1);
+    // 新值不该被重复插入
+    assertEqual(Rules.troopChoices('雷达').length, Rules.TROOP_OPTIONS.length);
+    assertEqual(Rules.troopChoices('').length, Rules.TROOP_OPTIONS.length);
+    assertEqual(Rules.troopChoices(undefined).indexOf('其他') !== -1, true);
+  });
+
+  test('预算设置表单：已配过额度的历史兵种仍然列出来（能看也能改）', async () => {
+    // 不列出来的话，老「步兵」压着的那笔预算在界面上就只剩"能看不能改"
+    const withLegacy = Rules.budgetTroops({ 步兵: 10000, 无人机: 5000 });
+    assertEqual(withLegacy.indexOf('步兵') !== -1, true, '配过额度的历史兵种应出现在预算表单里');
+    assertEqual(withLegacy.indexOf('无人机') !== -1, true);
+    // 顺序与 troopChoices 一致：历史值紧跟在「重装」之后
+    assertEqual(withLegacy[0], '重装');
+    assertEqual(withLegacy[1], '步兵');
+
+    // 没配过额度的新用户看不到历史兵种，列表就是常规选项
+    assertDeepEqual(Rules.budgetTroops({}), Rules.TROOP_OPTIONS);
+    assertDeepEqual(Rules.budgetTroops(null), Rules.TROOP_OPTIONS);
+    // 键存在但值为空/0 视为"没配"，与保存时的"空或 0 不落库"口径一致
+    assertEqual(Rules.budgetTroops({ 步兵: '' }).indexOf('步兵'), -1);
+  });
+
+  test('三个新兵种都能正常建申请并各自归到自己的预算桶', async () => {
+    await fresh();
+    for (const t of ['轮腿步兵', '过洞步兵', '可折叠步兵']) {
+      const id = await Ops.createRequest({
+        categoryId: 'mechanical', troop: t, name: t + '专用件',
+        quantity: 1, budget: '100', applicant: '张三'
+      });
+      const back = await DB.get('purchaseRequests', id);
+      assertEqual(back.troop, t, t + ' 应原样存下来');
+    }
+    const rows = (await Stats.budgetSummary(
+      await DB.getAll('purchaseRequests'), {}, 'all', DB.nowIso(), [])).rows;
+    ['轮腿步兵', '过洞步兵', '可折叠步兵'].forEach((t) => {
+      assert(rows.some((r) => r.troop === t), t + ' 应在预算里有独立的一行');
+    });
   });
 
   test('空值规范化成「未指定」，不硬塞成「其他」', async () => {
@@ -138,5 +205,55 @@ module.exports.register = function (H, DB, Rules, Ops) {
     await Rules.importAll(payload);
     const after = await DB.get('purchaseRequests', req.id);
     assertEqual(after.troop, '能量机关', '导入备份后兵种必须还在');
+  });
+
+  /* ---------- 第二十二轮：新增三个车型兵种 ---------- */
+
+  test('新增的舵轮机器人 / 老步兵机器人 / 新步兵机器人：可选、可存、可读回', async () => {
+    const added = ['舵轮机器人', '老步兵机器人', '新步兵机器人'];
+    added.forEach((t) => {
+      assertEqual(Rules.TROOP_OPTIONS.indexOf(t) !== -1, true, t + ' 应出现在下拉框里');
+      assertEqual(Rules.normalizeTroop(t), t, t + ' 是合法兵种，不该被折成「其他」');
+    });
+
+    await fresh();
+    for (const t of added) {
+      const req = await addRequest({ troop: t, name: '件-' + t });
+      assertEqual(Rules.troopOf(await DB.get('purchaseRequests', req.id)), t);
+    }
+  });
+
+  test('纯新增：旧的三个细分步兵一个都没动（老数据与预算归属不受影响）', async () => {
+    ['轮腿步兵', '过洞步兵', '可折叠步兵'].forEach((t) => {
+      assertEqual(Rules.TROOP_OPTIONS.indexOf(t) !== -1, true, t + ' 必须仍然可选（本轮定的是"旧的保留"）');
+      assertEqual(Rules.normalizeTroop(t), t, t + ' 的归属不能变');
+    });
+    // 历史值「步兵」也照旧只用于读取，不进下拉框
+    assertEqual(Rules.TROOP_OPTIONS.indexOf('步兵'), -1, '「步兵」仍然不出现在下拉框里');
+    assertEqual(Rules.normalizeTroop('步兵'), '步兵', '但老数据里的「步兵」仍然归它自己，不许折成「其他」');
+  });
+
+  test('筛选栏的兵种列表：全量列出，不靠"数据里出现过"', async () => {
+    const list = Rules.troopFilterList([]);
+    // 核心：一条申请都没有的时候，也得能看到全部可选兵种 ——
+    // 原来采购申请页用"从现有申请里收集"，新兵种就永远不显示（用户反馈的"兵种不全"）
+    ['舵轮机器人', '老步兵机器人', '新步兵机器人', '重装', '哨兵', '其他'].forEach((t) => {
+      assert(list.indexOf(t) !== -1, '空数据时也应列出 ' + t + '，实际：' + list.join('、'));
+    });
+    assertEqual(list.length, Rules.TROOP_OPTIONS.length);
+    assertEqual(list.indexOf('步兵'), -1, '历史值只在数据里真的出现过时才补进来');
+  });
+
+  test('筛选栏的兵种列表：数据里出现过的历史值要补进来', async () => {
+    const list = Rules.troopFilterList(['步兵', '哨兵', '哨兵', '', null, undefined]);
+    assert(list.indexOf('步兵') !== -1, '老申请写着「步兵」，筛选项必须有它，否则那些申请筛不出来');
+    assertEqual(list.length, Rules.TROOP_OPTIONS.length + 1, '补了历史值，但不该重复加');
+    assert(list.indexOf('' ) === -1 && list.indexOf(null) === -1, '空值不该变成选项');
+  });
+
+  test('筛选栏的兵种列表：乱七八糟的旧值不会被当成兵种', async () => {
+    const list = Rules.troopFilterList(['这是个不存在的兵种']);
+    assert(list.indexOf('这是个不存在的兵种') === -1, '不认识的值会被归一化成「其他」，不该原样出现');
+    assert(list.indexOf('其他') !== -1);
   });
 };

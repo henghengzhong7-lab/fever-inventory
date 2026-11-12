@@ -400,4 +400,200 @@ module.exports.register = function (H, DB, Rules, Ops) {
     assertEqual(missing, undefined, '申请确实已删除');
     assertEqual((await DB.getAll('transactions')).length, 1, '流水不受影响');
   });
+
+  /* ---------- 购买链接（第十四周） ---------- */
+
+  test('购买链接：没写协议补 https，写了 http 就尊重原样', async () => {
+    assertEqual(Rules.purchaseLink('item.taobao.com/x'), 'https://item.taobao.com/x');
+    assertEqual(Rules.purchaseLink('http://old.example.cn/p?id=1'), 'http://old.example.cn/p?id=1');
+    assertEqual(Rules.purchaseLink('  https://a.example.com/b  '), 'https://a.example.com/b', '两端空格应被去掉');
+  });
+
+  test('购买链接：伪协议一律判无效（这个值会进 <a href>）', async () => {
+    // 放行就等于给自己开一个注入口子：备份文件是可以被手改的，
+    // 界面渲染前还会再走一次 purchaseLink，所以这里必须挡死
+    assertEqual(Rules.purchaseLink('javascript:alert(1)'), '');
+    assertEqual(Rules.purchaseLink('data:text/html,<script>x</script>'), '');
+    assertEqual(Rules.purchaseLink('vbscript:msgbox'), '');
+    assertEqual(Rules.purchaseLink('file:///C:/windows'), '');
+  });
+
+  test('购买链接：空的、半截的、带空格的一律按"没填"处理', async () => {
+    ['', '   ', null, undefined].forEach((v) => {
+      assertEqual(Rules.purchaseLink(v), '', '空值应回空字符串');
+    });
+    assertEqual(Rules.purchaseLink('https://'), '', '只有协议头不算链接');
+    assertEqual(Rules.purchaseLink('随便写点什么'), '', '没有域名后缀的不算链接');
+    assertEqual(Rules.purchaseLink('http://a b.com'), '', '网址里不该有空白');
+  });
+
+  test('新建申请会把购买链接存下来，不填就是空字符串', async () => {
+    await fresh();
+    const withLink = await Ops.createRequest({
+      categoryId: 'mechanical', troop: '哨兵', name: '带链接的件', quantity: 1,
+      budget: '10', applicant: '张三', link: 'item.jd.com/100.html'
+    });
+    assertEqual((await DB.get('purchaseRequests', withLink)).link, 'https://item.jd.com/100.html');
+
+    const without = await Ops.createRequest({
+      categoryId: 'mechanical', troop: '哨兵', name: '没链接的件', quantity: 1,
+      budget: '10', applicant: '张三'
+    });
+    assertEqual((await DB.get('purchaseRequests', without)).link, '', '没填应是空字符串，不是 undefined');
+
+    const bad = await Ops.createRequest({
+      categoryId: 'mechanical', troop: '哨兵', name: '乱填的件', quantity: 1,
+      budget: '10', applicant: '张三', link: 'javascript:alert(1)'
+    });
+    assertEqual((await DB.get('purchaseRequests', bad)).link, '', '伪协议不该被存下来');
+  });
+
+  test('购买链接能进备份、能导出导入往返（不丢字段）', async () => {
+    await fresh();
+    const id = await Ops.createRequest({
+      categoryId: 'vision', troop: '无人机', name: '带链接', quantity: 1,
+      budget: '1', applicant: '甲', link: 'shop.example.com/p/9'
+    });
+    const payload = await Rules.exportAll();
+    await Rules.clearAll();
+    await Rules.importAll(payload);
+    assertEqual((await DB.get('purchaseRequests', id)).link, 'https://shop.example.com/p/9', '导入备份后链接应还在');
+  });
+
+  /* ---------- 直接入库的选填字段：总价 / 购买时间（第十四周） ---------- */
+
+  test('直接入库：总价与购买时间可以不填，照样入库', async () => {
+    await fresh();
+    const res = await Ops.inbound({
+      categoryId: 'mechanical', name: '忘了价格的件', quantity: 2,
+      identityMode: 'shared', operator: '张三'
+    });
+    const item = await DB.get('items', res.codes[0]);
+    assertEqual(item.totalPrice, null, '没填总价应是 null，而不是 0（两者在账上含义不同）');
+    assertEqual(item.purchaseDate, '', '没填购买时间应是空字符串');
+    assertEqual(item.inStockQty, 2, '缺价格不影响库存记账');
+  });
+
+  test('直接入库：填了总价与购买时间会存下来，且能往返备份', async () => {
+    await fresh();
+    const res = await Ops.inbound({
+      categoryId: 'mechanical', name: '带价格的件', quantity: 3,
+      identityMode: 'shared', operator: '张三',
+      totalPrice: '188.50', purchaseDate: '2026-09-01'
+    });
+    const item = await DB.get('items', res.codes[0]);
+    assertEqual(item.totalPrice, 188.5, '总价应存成数字');
+    assertEqual(item.purchaseDate, '2026-09-01');
+
+    const payload = await Rules.exportAll();
+    await Rules.clearAll();
+    await Rules.importAll(payload);
+    const back = await DB.get('items', res.codes[0]);
+    assertEqual(back.totalPrice, 188.5, '备份往返后总价不能丢');
+    assertEqual(back.purchaseDate, '2026-09-01', '备份往返后购买时间不能丢');
+  });
+
+  test('直接入库：总价乱填会被拒，0 元是合法值', async () => {
+    await fresh();
+    await assertRejects(() => Ops.inbound({
+      categoryId: 'mechanical', name: '乱填价', quantity: 1,
+      identityMode: 'shared', operator: '张三', totalPrice: 'abc'
+    }), '总价填了非数字应被拒绝');
+    await assertRejects(() => Ops.inbound({
+      categoryId: 'mechanical', name: '负数价', quantity: 1,
+      identityMode: 'shared', operator: '张三', totalPrice: '-5'
+    }), '总价不能是负数');
+
+    const free = await Ops.inbound({
+      categoryId: 'mechanical', name: '白来的件', quantity: 1,
+      identityMode: 'shared', operator: '张三', totalPrice: '0'
+    });
+    assertEqual((await DB.get('items', free.codes[0])).totalPrice, 0,
+      '0 元是合法值，必须和"没填"（null）分得开');
+  });
+
+  /* ---------- 补传发票 PDF（第十四周） ---------- */
+
+  /** 造一张"到货了但当时没拿到发票"的发票，返回它的 id */
+  async function arrivedWithoutInvoiceFile() {
+    await fresh();
+    const reqId = await Ops.createRequest({
+      categoryId: 'mechanical', troop: '哨兵', name: '后补发票件', quantity: 1, budget: '100', applicant: '张三'
+    });
+    const req = await DB.get('purchaseRequests', reqId);
+    req.approval = 'approved';
+    await DB.put('purchaseRequests', req);
+    const res = await Ops.arrive({
+      requestId: reqId, quantity: 1, amount: 100, operator: '李四', identityMode: 'shared'
+    });
+    return res.invoiceId;
+  }
+
+  const PDF_FILE = { name: '补传.pdf', mime: 'application/pdf', base64: 'JVBERi0xLjQK' };
+
+  test('到货时没传发票，之后可以补传', async () => {
+    const invoiceId = await arrivedWithoutInvoiceFile();
+    const before = await DB.get('invoices', invoiceId);
+    assertEqual(!!(before.fileRef || before.fileData), false, '到货时没传，就该是没有附件的状态');
+
+    const r = await Ops.attachInvoiceFile({ invoiceId, file: PDF_FILE });
+    assertEqual(r.ok, true);
+    const after = await DB.get('invoices', invoiceId);
+    assertEqual(after.fileData, PDF_FILE.base64, '离线版附件直接存进行数据（飞书版走上传接口，接口同名同义）');
+    assertEqual(after.fileName, '补传.pdf');
+    assertEqual(after.amount, 100, '补传只补附件，金额不动');
+    assertEqual(after.invoiceDate, before.invoiceDate, '到货日期也不动');
+  });
+
+  test('补传发票不改库存、不写流水', async () => {
+    const invoiceId = await arrivedWithoutInvoiceFile();
+    const itemsBefore = await DB.getAll('items');
+    const txnsBefore = await DB.getAll('transactions');
+    await Ops.attachInvoiceFile({ invoiceId, file: PDF_FILE });
+    const itemsAfter = await DB.getAll('items');
+    assertEqual(itemsAfter.length, itemsBefore.length, '补传不该新增物品');
+    assertEqual(itemsAfter[0].inStockQty, 1, '在库数量不该变');
+    assertEqual((await DB.getAll('transactions')).length, txnsBefore.length, '补传不该写流水');
+  });
+
+  test('补传发票：已有附件时是覆盖，并如实回报', async () => {
+    const invoiceId = await arrivedWithoutInvoiceFile();
+    const first = await Ops.attachInvoiceFile({ invoiceId, file: PDF_FILE });
+    assertEqual(first.replaced, false, '第一次是补传，不是替换');
+    const second = await Ops.attachInvoiceFile({
+      invoiceId, file: { name: '换一份.pdf', mime: 'application/pdf', base64: 'QUJD' }
+    });
+    assertEqual(second.replaced, true, '第二次是在覆盖原来那份');
+    const after = await DB.get('invoices', invoiceId);
+    assertEqual(after.fileName, '换一份.pdf');
+    assertEqual(after.fileData, 'QUJD', '内容也应该是新的');
+  });
+
+  test('补传发票：非 PDF、空文件、找不到发票、缺编号都要被拒', async () => {
+    const invoiceId = await arrivedWithoutInvoiceFile();
+    await assertRejects(() => Ops.attachInvoiceFile({
+      invoiceId, file: { name: '照片.png', mime: 'image/png', base64: 'AAA' }
+    }), '非 PDF 应被拒');
+    await assertRejects(() => Ops.attachInvoiceFile({ invoiceId, file: null }), '没选文件应被拒');
+    await assertRejects(() => Ops.attachInvoiceFile({
+      invoiceId, file: { name: '空的.pdf', mime: 'application/pdf' }
+    }), '缺内容应被拒');
+    await assertRejects(() => Ops.attachInvoiceFile({ invoiceId: 999999, file: PDF_FILE }), '发票不存在应被拒');
+    await assertRejects(() => Ops.attachInvoiceFile({ file: PDF_FILE }), '缺发票编号应被拒');
+
+    // 被拒之后原来那张发票仍然是"没有附件"，不留半套状态
+    const inv = await DB.get('invoices', invoiceId);
+    assertEqual(!!(inv.fileRef || inv.fileData), false, '失败不该留下残缺的附件字段');
+  });
+
+  test('补传发票能进备份：导出导入后附件还在', async () => {
+    const invoiceId = await arrivedWithoutInvoiceFile();
+    await Ops.attachInvoiceFile({ invoiceId, file: PDF_FILE });
+    const payload = await Rules.exportAll();
+    await Rules.clearAll();
+    await Rules.importAll(payload);
+    const back = await DB.get('invoices', invoiceId);
+    assertEqual(back.fileData, PDF_FILE.base64, '离线版的附件跟着发票行一起备份，补传的也一样');
+    assertEqual(await DB.loadInvoiceFile(back).then((f) => f && f.base64), PDF_FILE.base64);
+  });
 };

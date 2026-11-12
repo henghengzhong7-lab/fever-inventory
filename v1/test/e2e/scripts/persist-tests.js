@@ -92,7 +92,7 @@
 
     await E2E.record('第 1 步：造好一整套数据并记下应有的条数', function () {
       E2E.ok(counts.items === 3, '应有 3 件物品，实际 ' + counts.items);
-      E2E.ok(counts.categories === 4, '应有 4 个大类，实际 ' + counts.categories);
+      E2E.ok(counts.categories === 6, '应有 6 个大类，实际 ' + counts.categories);
       E2E.ok(counts.purchaseRequests === 1, '应有 1 条采购申请');
       E2E.ok(counts.invoices === 1, '应有 1 张发票');
       E2E.ok(counts.transactions >= 4, '流水应有入库与借出记录，实际 ' + counts.transactions);
@@ -186,7 +186,7 @@
     await E2E.record('页面能正常渲染出重启后的数据（不是空白页）', async function () {
       global.FEVER.App.goto('home');
       await E2E.waitUntil('首页渲染', function () {
-        return document.querySelectorAll('.cat-card').length === 4;
+        return document.querySelectorAll('.cat-card').length === 6;
       });
       var body = text('#view-root');
       E2E.ok(body.indexOf('物资总览') !== -1, '首页应正常渲染');

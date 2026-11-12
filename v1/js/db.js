@@ -123,6 +123,11 @@
         result = fn(T);
       } catch (err) {
         try { tx.abort(); } catch (e) { /* 事务可能已结束，忽略 */ }
+        // 事务被中断后 completed 会以「事务被中断」拒绝，这里必须接住它：
+        // 没人接就是一个未处理的 Promise 拒绝（Node 里直接让进程崩掉），
+        // 而调用方真正该看到的是下面这个 err —— 它才说明"为什么失败"。
+        // 这个坑是被一次同步抛错（在事务回调里做字段校验）踩出来的。
+        completed.catch(function () {});
         return Promise.reject(err);
       }
       return Promise.resolve(result).then(function (value) {
@@ -173,6 +178,48 @@
     return dbPut('settings', { key: key, value: value, updatedAt: nowIso() });
   }
 
+  /**
+   * 生成 count 个连续的新编码（第二十六轮：从 rules.js 搬到数据层）。
+   *
+   * 为什么搬到数据层：**发号这件事两个版本的做法必须不同** ——
+   *   · 离线版（这个文件）：单机、没有并发，本地事务算号就够了（就是下面这段）
+   *   · 飞书共享版：多个人同时在用，各自在本机算号就会撞（A、B 都算出 MC-0007）
+   *     → 那边改成**向服务端领一段号**，服务端有串行队列，天生不会撞
+   * 界面代码两边同一份，所以差异收在数据层的同名方法里。
+   *
+   * 这里沿用原来的做法与键名（`codeCounter:<前缀>`）：计数器与物品表放在同一个事务里，
+   * 批量生成不会重号；物品被删掉也不会重号（编码不复用）。
+   */
+  function nextCodes(prefix, count) {
+    var pre = String(prefix || 'IT');
+    var n = Math.max(1, Number(count) || 1);
+    var key = 'codeCounter:' + pre;
+    return runTx(['settings', 'items'], 'readwrite', function (T) {
+      return T.get('settings', key).then(function (row) {
+        if (row && typeof row.value === 'number') return row.value;
+        // 首次使用：扫描已有物品，从最大流水号继续，兼容导入的旧数据
+        return T.getAll('items').then(function (items) {
+          var max = 0;
+          items.forEach(function (it) {
+            if (!it.code || it.code.indexOf(pre + '-') !== 0) return;
+            var parsed = parseInt(it.code.slice(pre.length + 1), 10);
+            if (!isNaN(parsed) && parsed > max) max = parsed;
+          });
+          return max;
+        });
+      }).then(function (base) {
+        var codes = [];
+        for (var i = 1; i <= n; i += 1) {
+          codes.push(pre + '-' + String(base + i).padStart(4, '0'));
+        }
+        return T.put('settings', { key: key, value: base + n, updatedAt: nowIso() })
+          .then(function () { return codes; });
+      });
+    });
+  }
+
+  /**
+   * 当前使用者是不是管理员。
   /**
    * 当前使用者是不是管理员。
    *
@@ -250,6 +297,7 @@
     getByIndex: dbGetByIndex,
     remove: dbDelete,
     count: dbCount,
+    nextCodes: nextCodes,
     getSetting: getSetting,
     setSetting: setSetting,
     isAdmin: isAdmin,
@@ -263,6 +311,14 @@
      */
     notifyTest: function () {
       return Promise.reject(new Error('离线版没有飞书提醒。要测提醒，请在飞书里打开应用后到设置页再试'));
+    },
+    /**
+     * 提醒申请人补发票（第十五轮）。
+     * 离线版没有服务端、没有飞书，永远发不出去 —— 明确拒绝，
+     * 界面据此显示"这台机器上发不了"，而不是假装提醒过了。
+     */
+    notifyInvoice: function () {
+      return Promise.reject(new Error('离线版没有飞书提醒。要在飞书里打开应用，才能提醒队员补发票'));
     }
   };
 

@@ -33,8 +33,8 @@ module.exports.register = function (H, DB, Rules, Ops) {
     assertEqual(list.length, 0);
   });
 
-  test('删除记录最多留 300 条', async () => {
-    assertEqual(Rules.DELETE_LOG_MAX, 300);
+  test('删除记录最多留 50 条（2026-10-20 由 300 下调，避免删除请求体越过浏览器 keepalive 的 64KB 上限）', async () => {
+    assertEqual(Rules.DELETE_LOG_MAX, 50);
   });
 
   test('离线版的操作人如实写「本机操作」，不编一个假名字', async () => {
@@ -78,15 +78,49 @@ module.exports.register = function (H, DB, Rules, Ops) {
     assertEqual(JSON.parse(JSON.stringify(list[0])).snapshot, null);
   });
 
-  test('超过 300 条时挤掉最老的，只留最近 300 条', async () => {
+  test('超过上限时挤掉最老的，只留最近 N 条（N = DELETE_LOG_MAX）', async () => {
     await fresh();
-    for (let i = 1; i <= 305; i += 1) {
+    // 引用常量而不是写死数字：上限调整过两次（300 → 50），写死会让这条测试下次又假红
+    const N = Rules.DELETE_LOG_MAX;
+    for (let i = 1; i <= N + 5; i += 1) {
       await Rules.logDeletion({ store: 'items', key: 'MC-' + i, label: '第 ' + i + ' 件' });
     }
     const list = await Rules.getDeleteLog();
-    assertEqual(list.length, 300, '上限是 300 条');
+    assertEqual(list.length, N, '上限是 ' + N + ' 条');
     assertEqual(list[0].key, 'MC-6', '最早那几条应当被挤掉');
-    assertEqual(list[list.length - 1].key, 'MC-305', '最新一条要在最后');
+    assertEqual(list[list.length - 1].key, 'MC-' + (N + 5), '最新一条要在最后');
+  });
+
+  test('快照很占体积：按字符数再收一道，丢最老的、保住最新的', async () => {
+    // 这一条钉的是 2026-10 线上的真实故障：每票都带整条被删内容的快照，
+    // 122 票就有 6 万多字符。照这个速度涨到 300 票会是 14.9 万字符，
+    // 超过飞书多维表格「多行文本单元格 ≤10 万字符」的上限 —— 那一格就写不进去了，
+    // 而删除记录和删除本身在同一个写入批次里，日志写失败会把删除一起拖失败。
+    await fresh();
+    const fat = { code: 'MC-9001', name: '带快照的大块头物品', spec: '一长串规格型号文字占体积',
+      categoryId: 'mechanical', location: 'A 柜第三层',
+      remark: '回归用例垫数据用。'.repeat(30) };
+    for (let i = 1; i <= 280; i += 1) {
+      await Rules.logDeletion({
+        store: 'items', key: 'MC-9' + String(i).padStart(3, '0'),
+        label: '第 ' + i + ' 件带快照的', snapshot: fat
+      });
+    }
+    const list = await Rules.getDeleteLog();
+    const chars = JSON.stringify(list).length;
+    assert(chars <= Rules.DELETE_LOG_MAX_CHARS,
+      '总体积应在 ' + Rules.DELETE_LOG_MAX_CHARS + ' 字符以内，实际 ' + chars);
+    assert(list.length < 280, '体积到顶时应当已经开始丢老票，实际还剩 ' + list.length);
+    assertEqual(list[list.length - 1].key, 'MC-9280', '最新一票必须保住，不能为了省体积把它丢了');
+    assert(list.every(r => !!r.snapshot), '留下的每一票都还要带着快照');
+  });
+
+  test('单票体积就超预算时也留着它（不能把这次删除记成没留痕）', async () => {
+    await fresh();
+    const huge = { name: '一条就超大', blob: 'x'.repeat(Rules.DELETE_LOG_MAX_CHARS) };
+    await Rules.logDeletion({ store: 'items', key: 'MC-0001', label: '超大快照', snapshot: huge });
+    const list = await Rules.getDeleteLog();
+    assertEqual(list.length, 1, '再怎么超也要把这一票留下');
   });
 
   test('还有实物借在外面 / 待修时不许删物品', async () => {

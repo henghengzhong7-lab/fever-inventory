@@ -44,9 +44,13 @@ function createFakeBackend() {
   STORES.forEach(function (name) { data[name] = []; });
 
   let writeCount = 0;
+  let reserveCount = 0;
+  let reserveSpans = [];
   let lastOps = [];
   let writeDelayMs = 0;
   const writeBodies = [];
+  /** 每个写请求的形态：{ keepalive, bytes, opCount } —— keepalive 的正文上限就是这里钉的 */
+  const writeRequests = [];
 
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
@@ -79,11 +83,74 @@ function createFakeBackend() {
       if (target.indexOf('/api/data') !== -1) {
         return response(200, { ok: true, sequences: sequences(), data: JSON.parse(JSON.stringify(data)) });
       }
+      // 领一段编码（第二十六轮）：水位存在 settings 的 codeCounter:<前缀> 里，
+      // 和真实服务端同一套规则（没有水位行时从物品表扫最大号）
+      // 领一段记录 id（第二十八轮）：水位存 settings 的 idCounter:<表名>，
+      // 与真实服务端同一套规则（没有水位行时从该表现有最大 id 往后接）
+      if (target.indexOf('/api/reserve-ids') !== -1) {
+        const rb = JSON.parse(init.body || '{}');
+        const rStore = String(rb.store || '');
+        const rCount = Math.max(1, Math.min(200, Number(rb.count) || 1));
+        if (!AUTO[rStore]) {
+          return response(400, { ok: false, message: '这张表不用自增编号：' + rStore });
+
+          return;
+        }
+        const rKey = 'idCounter:' + rStore;
+        const rRow = data.settings.filter(function (r) { return r.key === rKey; })[0];
+        let rBase = rRow && typeof rRow.value === 'number' ? rRow.value : 0;
+        if (!rRow) {
+          data[rStore].forEach(function (r) {
+            const n = Number(r.id);
+            if (!isNaN(n) && n > rBase) rBase = n;
+          });
+        }
+        const rIds = [];
+        for (let ri = 1; ri <= rCount; ri += 1) rIds.push(rBase + ri);
+        if (rRow) { rRow.value = rBase + rCount; } else {
+          data.settings.push({ key: rKey, value: rBase + rCount, updatedAt: new Date().toISOString() });
+        }
+          return response(200, { ok: true, store: rStore, ids: rIds, from: rBase + 1, to: rBase + rCount });
+
+        return;
+      }
+      if (target.indexOf('/api/reserve-codes') !== -1) {
+        reserveCount += 1;
+        const body = JSON.parse(init.body);
+        const prefix = String(body.prefix || '').toUpperCase();
+        const count = Math.max(1, Number(body.count) || 1);
+        const counterKey = 'codeCounter:' + prefix;
+        const row = data.settings.filter(function (r) { return r.key === counterKey; })[0];
+        let base = row && typeof row.value === 'number' ? row.value : 0;
+        if (!row) {
+          data.items.forEach(function (it) {
+            if (!it.code || it.code.indexOf(prefix + '-') !== 0) return;
+            const parsed = parseInt(it.code.slice(prefix.length + 1), 10);
+            if (!isNaN(parsed) && parsed > base) base = parsed;
+          });
+        }
+        const codes = [];
+        for (let i = 1; i <= count; i += 1) {
+          codes.push(prefix + '-' + String(base + i).padStart(4, '0'));
+        }
+        if (row) { row.value = base + count; } else {
+          data.settings.push({ key: counterKey, value: base + count, updatedAt: new Date().toISOString() });
+        }
+        reserveSpans.push([base + 1, base + count]);
+        return response(200, { ok: true, prefix: prefix, codes: codes, from: base + 1, to: base + count });
+      }
       if (target.indexOf('/api/write') !== -1) {
         const body = JSON.parse(init.body);
         writeCount += 1;
         lastOps = body.ops;
         writeBodies.push(body.ops);
+        // 真实浏览器还会按 keepalive 的体型规矩拒发请求（>64KB 直接 TypeError）。
+        // Node 的 fetch 不执行这条规矩，所以在这里如实记下来，由用例断言。
+        writeRequests.push({
+          keepalive: !!(init && init.keepalive),
+          bytes: Buffer.byteLength(String(init.body || ''), 'utf8'),
+          opCount: body.ops.length
+        });
         // 模拟飞书那一侧的真实耗时：写比读慢得多，这里让"界面要不要等"变得可观测
         return sleep(writeDelayMs).then(function () {
           for (const op of body.ops) {
@@ -130,7 +197,13 @@ function createFakeBackend() {
     fetch: fetchMock,
     data: data,
     setWriteDelay: function (ms) { writeDelayMs = ms; },
-    stats: function () { return { writeCount: writeCount, lastOps: lastOps, writeBodies: writeBodies }; }
+    stats: function () {
+      return {
+        writeCount: writeCount, lastOps: lastOps, writeBodies: writeBodies,
+        writeRequests: writeRequests,
+        reserveCount: reserveCount, reserveSpans: reserveSpans
+      };
+    }
   };
 }
 
@@ -176,8 +249,8 @@ async function main() {
 
   console.log('\n[2] 初始化大类（对应 app.js 启动时的 Rules.initCategories）');
   const cats = await Rules.initCategories();
-  equal('四个大类已写入', cats.length, 4);
-  equal('第二次初始化不会重复写入', (await Rules.initCategories()).length, 4);
+  equal('六个大类已写入', cats.length, 6);
+  equal('第二次初始化不会重复写入', (await Rules.initCategories()).length, 6);
 
   console.log('\n[3] 入库（shared 模式：N 件共用一个编码）');
   const inbound = await Ops.inbound({
@@ -321,7 +394,14 @@ async function main() {
   const mergeDelta = backend.stats().writeCount - beforeMerge;
   equal('入库一步只发了 1 个写请求（旧版是 2 个）', mergeDelta, 1);
   const merged = backend.stats().writeBodies[backend.stats().writeBodies.length - 1];
-  check('这个请求里同时带着占编码和落库两类操作（' + merged.length + ' 条 op）', merged.length >= 3, merged.length);
+  // 第二十六轮：**占编码不再由前端做**（改成服务端发号，见 [18]），
+  // 所以这个请求里只剩落库类的 op —— 恰好要断言「没有 settings 计数器那一笔」，
+  // 因为那一笔正是撞号的来源（两个客户端各写各的计数器）。
+  const hasCounterOp = merged.some(function (op) {
+    return op.store === 'settings' && op.data && String(op.data.key || '').indexOf('codeCounter:') === 0;
+  });
+  check('请求里不再有「前端自己占编码」那一笔（改由服务端发号）', !hasCounterOp, hasCounterOp);
+  check('落库的 op 都在（items + transactions）', merged.length >= 2, merged.length);
 
   console.log('\n[14] 导入备份这类大事务仍然等服务器确认');
   const backup2 = await Rules.exportAll();
@@ -510,9 +590,220 @@ async function main() {
   equal('手机端看到的在库/借出数量与电脑端一致', phoneItem2 && phoneItem2.inStockQty, 1);
   equal('手机端看到的借出数与电脑端一致', phoneItem2 && phoneItem2.lentQty, 2);
 
+  console.log('\n[18] 编码由服务端发号：领一段用一段，两个客户端不会撞号（第二十六轮）');
+
+  // 这一节的由来：原来编码序号是前端各自在本机算的，两个人同时添加物品就会
+  // 都算出同一个号 → 服务端 409 → 界面提示"请重新操作一次"并重拉全量数据。
+  // 现在改成「服务端发号 + 前端领一段存着用」，这里钉住三件事：
+  //   ① 领一段之后连续取号**不再打网络**（所以入库不会再有额外等待）
+  //   ② 发出的号不重复
+  //   ③ 池子用尽后再领，新段与旧段**不重叠**（这是"永远不会撞"的依据）
+  const reserveBefore = backend.stats().reserveCount;
+  const zzCodesA = await DB.nextCodes('ZZ', 3);
+  const afterFirst = backend.stats().reserveCount;
+  equal('第一次取号会去服务端领一段', afterFirst - reserveBefore, 1);
+  equal('拿到 3 个号', zzCodesA.length, 3);
+  check('号是连号且形如 ZZ-0001', /^ZZ-\d{4}$/.test(zzCodesA[0]) && zzCodesA[2].endsWith(String(Number(zzCodesA[0].slice(3)) + 2).padStart(4, '0')), zzCodesA.join(','));
+
+  // 池子里应该还剩（一段 20 个，用掉 3 个）
+  const zzCodesB = await DB.nextCodes('ZZ', 5);
+  equal('池子里还有货时不再打网络', backend.stats().reserveCount - afterFirst, 0);
+  const zzAll = zzCodesA.concat(zzCodesB);
+  equal('发出的号互不重复', new Set(zzAll).size, zzAll.length);
+
+  // 把这一段用光，逼它再领一段 —— 新段必须接在旧段后面，不能回头
+  const zzCodesC = await DB.nextCodes('ZZ', 12);   // 3+5+12 = 20，正好用光这一段
+  const spans = backend.stats().reserveSpans;
+  equal('用过一段后应该只领过一次', spans.length >= 1, true);
+  // ⚠️ stats() 返回的是同一个数组引用，得先存个长度快照（拿引用比 length 永远相等）
+  const zzSpansBefore = backend.stats().reserveSpans.length;
+  const zzCodesD = await DB.nextCodes('ZZ', 2);
+  const spans2 = backend.stats().reserveSpans;
+  // ⚠️ stats() 返回的是同一个数组引用，不能拿它跟之前的引用比 length（那永远相等）
+  check('池子用尽后会再领一段', spans2.length > zzSpansBefore, spans2.length + ' vs ' + zzSpansBefore);
+  const lastSpan = spans2[spans2.length - 1];
+  const prevSpan = spans2[spans2.length - 2];
+  check('新领的一段与上一段不重叠（' + JSON.stringify(prevSpan) + ' → ' + JSON.stringify(lastSpan) + '）',
+    lastSpan[0] > prevSpan[1], lastSpan[0]);
+  const lastCode = Number(zzCodesD[0].slice(3));
+  check('新段里的号比上一段最大号还大', lastCode > prevSpan[1], lastCode + ' vs ' + prevSpan[1]);
+
+  // 全部号一起看一遍：一个都不能重（这是"绝不撞号"的直接证据）
+  const zzEverything = zzAll.concat(zzCodesC).concat(zzCodesD);
+  equal('整个过程中发出的号一个都没重复', new Set(zzEverything).size, zzEverything.length);
+
+  // 入库也走同一条路：领号 + 落库，且落库那一步是正常写请求
+  const writeBefore = backend.stats().writeCount;
+  const inboundRes = await Ops.inbound({
+    categoryId: 'mechanical', name: '发号机制测试件', quantity: 1,
+    identityMode: 'shared', operator: '张三'
+  });
+  await DB.whenSettled();
+  check('入库仍然正常拿到编码', /^MC-\d{4}$/.test(inboundRes.codes[0]), inboundRes.codes[0]);
+  equal('入库仍然只发一个写请求', backend.stats().writeCount - writeBefore, 1);
+
+  console.log('\n[19] 记录 id 也由服务端发：连续写入不撞号（第二十八轮）');
+  // 起因：流水 id 原来是本机计数器分配的，而每次入库都会写一条流水 ——
+  // 两人同时入库几乎必然分到同一个 id（服务端 409「编号 N 已被占用」）。
+  const zzWritesBefore = backend.stats().writeCount;
+  const zzIdsBefore = (await DB.getAll('transactions')).map(function (t) { return Number(t.id); });
+  for (let zz = 0; zz < 3; zz += 1) {
+    await Ops.inbound({
+      categoryId: 'mechanical', name: '发号测试件' + zz, quantity: 1,
+      identityMode: 'shared', operator: '张三'
+    });
+    await DB.whenSettled();
+  }
+  const zzIdsAfter = (await DB.getAll('transactions')).map(function (t) { return Number(t.id); });
+  const zzNew = zzIdsAfter.filter(function (id) { return zzIdsBefore.indexOf(id) === -1; });
+  check('三次入库新增的流水号一个都不重复（' + zzNew.join(',') + '）',
+    new Set(zzNew).size === zzNew.length, zzNew);
+  equal('每次入库仍然只发一个写请求', backend.stats().writeCount - zzWritesBefore, 3);
+  const zzServerIds = backend.data.transactions.map(function (t) { return Number(t.id); });
+  check('服务器上也没有重复的 id（' + zzServerIds.length + ' 条）',
+    new Set(zzServerIds).size === zzServerIds.length, zzServerIds);
+
+  console.log('\n[20] 预热只补不消耗：反复同步不会把号池抽干（第二十九轮）');
+  // 起因：上一轮的 prewarmIds 写成 takeIds(name,1) —— 那是"取走一个号"、返回值还被丢掉，
+  // 于是每次 loadAll 都白扔号，池子见底后每次写记录都要真去领号（一次飞书写往返）→ 单人操作也卡。
+  // 这里钉住两件事：反复同步不重复领号；池子够用时连续写入不额外领号。
+  const zzResBefore = backend.stats().reserveCount;
+  await DB.syncNow();
+  await DB.syncNow();
+  await DB.syncNow();
+  const zzResAfter = backend.stats().reserveCount;
+  check('反复同步不会每次都去领号（期间领号 ' + (zzResAfter - zzResBefore) + ' 次）',
+    zzResAfter - zzResBefore <= 1, zzResAfter - zzResBefore);
+
+  const zzWBefore = backend.stats().reserveCount;
+  for (let zz = 0; zz < 8; zz += 1) {
+    await DB.add('transactions', {
+      itemCode: 'X', type: 'lend', qty: 1, operator: '测试',
+      createdAt: new Date().toISOString()
+    });
+  }
+  await DB.whenSettled();
+  const zzSpent = backend.stats().reserveCount - zzWBefore;
+  check('连续写 8 条期间领号次数很少（实际 ' + zzSpent + ' 次，池里够用就该是 0）',
+    zzSpent <= 1, zzSpent);
+  const zzAllIds = (await DB.getAll('transactions')).map(function (t) { return Number(t.id); });
+  check('这 8 条的号互不重复（共 ' + zzAllIds.length + ' 条）',
+    new Set(zzAllIds).size === zzAllIds.length, zzAllIds.join(','));
+
+  console.log('\n[21] 号池不会「越补越领」：本地已有相同 id 时领号次数必须有上界（第二十九轮）');
+  // 这一条钉的是我自己造的故障：本地镜像里已有 id=1（改系统之前是本机计数器造号，
+  // 与服务端水位并不一致），而服务端又发来同一段 → 过滤后池空。
+  // 上一版实现是 `return takeIds(store, count)` 递归 + 「池低就补」，
+  // 于是"取号 → 发现不够 → 领 → 号又被占用 → 再领…"每一步都是一次 HTTP 请求，
+  // 单人操作也会被拖垮。这里用"领号请求次数"当上界来测。
+  backend.data.transactions.push({
+    id: 1, itemCode: 'X', type: 'lend', qty: 1,
+    operator: '别人', createdAt: new Date().toISOString()
+  });
+  await DB.syncNow();
+
+  const fillBefore = backend.stats().reserveCount;
+  for (let zz = 0; zz < 3; zz += 1) {
+    await DB.add('transactions', {
+      itemCode: 'X', type: 'lend', qty: 1, operator: '测试',
+      createdAt: new Date().toISOString()
+    });
+  }
+  await DB.whenSettled();
+  const spent = backend.stats().reserveCount - fillBefore;
+  check('3 次写入期间的领号请求不超过 3 次（实际 ' + spent + '；旧实现会无上限递归）',
+    spent <= 3, spent);
+
+  // ⚠️ 表里现在**故意**有一个重复的 id（上面塞进去那条），所以不能断言'整表无重复'。
+  // 该断言的是：新写入的 3 条互不相同，且都避开了那个已被占用的 1 ——
+  // 这才真正验证了'跳过本地已占用号'这道防御在生效。
+  const ids21 = (await DB.getAll('transactions')).map(function (t) { return Number(t.id); });
+  const fresh21 = ids21.slice(-3);
+  check('新写入的 3 条：互不相同且都避开了本地已占用的 1（实际 ' + fresh21.join(',') + '）',
+    new Set(fresh21).size === 3 && fresh21.every(function (id) { return id > 1; }), fresh21.join(','));
+
+  console.log('\n[22] 大写入不带 keepalive：请求体超过浏览器上限时不能再被直接拒发');
+  // 这一条钉的是一个真实故障（线上 2026-10 出现：物品删不掉，提示"连不上服务器"）：
+  //   浏览器规定**带 keepalive 的请求正文 ≤64KB**，且同一时刻在飞的多个 keepalive
+  //   请求**共享**这 64KB。超限不降级 —— 整个请求被拒（TypeError: Failed to fetch），
+  //   界面看到的就是"连不上服务器，请检查网络后重试"。
+  //   删除物品的写入带着「删除记录」：每票存一条整条物品快照。线上攒到 122 票时
+  //   正文 66,019 字节，越过 65,536 的上限 —— 从那以后每次删除必失败，物品删不掉。
+  // 修法：flushNow 先量体型，超 KEEPALIVE_MAX_BYTES 的走普通 fetch，小的才用 keepalive。
+
+  // 1) 造一件可删的物品
+  const klInbound = await Ops.inbound({
+    categoryId: 'mechanical', name: '大写入测试件', quantity: 1,
+    identityMode: 'single', operator: '张三'
+  });
+  await DB.whenSettled();
+  const klCode = klInbound.codes[0];
+  const klRow = await DB.get('items', klCode);   // 快照要在删之前取
+
+  // 2) 把「删除记录」垫到线上真实量级（一百多票，每票一条整条物品快照）
+  const klFatLog = [];
+  for (let kl = 0; kl < 240; kl += 1) {
+    klFatLog.push({
+      at: '2026-10-01T00:00:00.000Z',
+      by: '历史操作',
+      store: 'items',
+      key: 'MC-9' + String(kl).padStart(3, '0'),
+      label: '物品 MC-9' + String(kl).padStart(3, '0') + '历史已删物品',
+      reason: '',
+      snapshot: {
+        code: 'MC-9' + String(kl).padStart(3, '0'),
+        name: '历史已删物品',
+        spec: '规格型号一长串文字，让快照占够体积',
+        categoryId: 'mechanical',
+        location: 'A 柜第三层',
+        identityMode: 'single',
+        totalQty: 1, inStockQty: 1, lentQty: 0, repairQty: 0, usedUpQty: 0,
+        status: 'in_stock',
+        remark: '删除记录回归用例垫数据用，不是真物品'
+      }
+    });
+  }
+  await DB.setSetting(Rules.DELETE_LOG_KEY, klFatLog);
+  await DB.whenSettled();
+
+  // 3) 走真实删除路径：删物品 + 写删除记录，两条 op 合成同一个写请求
+  const klWriteBefore = backend.stats().writeRequests.length;
+  await DB.remove('items', klCode);
+  await Rules.logDeletion({
+    store: 'items', key: klCode, label: '物品 ' + klCode + ' 大写入测试件',
+    reason: '回归', snapshot: klRow
+  });
+  await DB.whenSettled();
+  const klWrites = backend.stats().writeRequests.slice(klWriteBefore);
+  const klBig = klWrites.filter(function (r) { return r.bytes > 64 * 1024; });
+  check('删除的写请求体确实越过了浏览器 keepalive 的 64KB 上限（' +
+    (klBig[0] ? klBig[0].bytes + ' 字节' : '没有') + '；线上就是这么坏的）',
+    klBig.length >= 1, klWrites.map(function (r) { return r.bytes; }).join(','));
+  check('越过上限的请求没有带 keepalive（带了会被浏览器整个拒发）',
+    klBig.length > 0 && klBig.every(function (r) { return !r.keepalive; }));
+  check('物品在服务器上真的删掉了（请求正常送达，没有被拒发）',
+    !backend.data.items.some(function (i) { return i.code === klCode; }));
+  const klFinalLog = backend.data.settings.filter(function (s) {
+    return s.key === Rules.DELETE_LOG_KEY;
+  })[0].value;
+  const klFinalChars = JSON.stringify(klFinalLog).length;
+  check('这次的删除记录也写上了（' + klFinalLog.length + ' 票 / ' + klFinalChars + ' 字符）',
+    klFinalLog.length > 200 && klFinalChars <= Rules.DELETE_LOG_MAX_CHARS,
+    '票数 ' + klFinalLog.length + '、字符 ' + klFinalChars +
+    '（超过飞书 10 万字符上限那一格就写不进去了）');
+
+  // 4) 小写入照旧带 keepalive —— 修的是"别让大请求撞上限"，不是把 keepalive 关掉
+  await DB.setSetting('keepaliveProbe', { hello: 1 });
+  await DB.whenSettled();
+  const klSmall = backend.stats().writeRequests[backend.stats().writeRequests.length - 1];
+  check('小写入仍然带 keepalive（队员点完确认就关页面也发得出去）',
+    !!klSmall.keepalive && klSmall.bytes < 32 * 1024,
+    'keepalive=' + klSmall.keepalive + ' bytes=' + klSmall.bytes);
+
   console.log('\n结果：' + passed + ' 项通过，' + failed + ' 项失败\n');
   process.exit(failed === 0 ? 0 : 1);
 }
+
 
 main().catch(function (err) {
   console.error('\n测试崩了：', err && err.stack ? err.stack : err);

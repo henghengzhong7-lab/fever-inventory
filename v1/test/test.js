@@ -30,6 +30,14 @@ const codeCases = require('./cases/codes.js');
 const invariantCases = require('./cases/invariant.js');
 const backupCases = require('./cases/backup.js');
 const troopCases = require('./cases/troop.js');
+const identityCases = require('./cases/identity.js');
+const searchCases = require('./cases/search.js');
+const cartCases = require('./cases/batch-cart.js');
+const labelImageCases = require('./cases/label-image.js');
+const printRecordCases = require('./cases/print-record.js');
+const txnDeleteCases = require('./cases/txn-delete.js');
+const addedByCases = require('./cases/added-by.js');
+const sameNameCases = require('./cases/same-name.js');
 const approvalCases = require('./cases/approval.js');
 const budgetCases = require('./cases/budget.js');
 const deleteCases = require('./cases/delete.js');
@@ -43,7 +51,7 @@ const serverCases = require('./cases/server.js');
 const offlineCases = require('./cases/offline.js');
 const invoiceCases = require('./cases/invoice.js');
 
-[syntaxCases, apiCases, cases, codeCases, invariantCases, backupCases, troopCases, approvalCases, budgetCases,
+[syntaxCases, apiCases, cases, codeCases, invariantCases, backupCases, troopCases, identityCases, searchCases, cartCases, labelImageCases, printRecordCases, txnDeleteCases, addedByCases, sameNameCases, approvalCases, budgetCases,
   deleteCases, batchCases, scanCases, reminderCases, opsCases, linkCases, moduleCases, serverCases, offlineCases,
   invoiceCases]
   .forEach((mod) => mod.register(H, DB, Rules, Ops));

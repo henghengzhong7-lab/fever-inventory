@@ -239,11 +239,11 @@ module.exports.register = function (H, DB, Rules, Ops) {
     assertEqual(log.length, 1);
   });
 
-  test('批量删除的账超出上限时只留最近 300 条', async () => {
+  test('批量删除的账超出上限时只留最近 N 条（N = DELETE_LOG_MAX）', async () => {
     await fresh();
-    // 先塞满，再加进来 5 条就该触发裁剪
+    // 先塞到"上限差 2 条"，再加进来 5 条就该触发裁剪（引用常量，上限变了也不假红）
     const old = [];
-    for (let i = 0; i < 298; i += 1) {
+    for (let i = 0; i < Rules.DELETE_LOG_MAX - 2; i += 1) {
       old.push({ at: DB.nowIso(), by: '旧', store: 'items', key: 'OLD-' + i, label: '物品 OLD-' + i, reason: '', snapshot: null });
     }
     await DB.setSetting(Rules.DELETE_LOG_KEY, old);

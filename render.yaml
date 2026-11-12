@@ -1,0 +1,26 @@
+# Render 免费部署配置（可选）
+#
+# 用法：Render 控制台 → New → Blueprint → 选本仓库 → Apply
+# 详细步骤见 docs/DEPLOY_FREE.md
+#
+# 为什么 Root Directory 留空：构建命令要在仓库根目录跑
+# （scripts/build-feishu.js 把 v1/ 的前端构建进 server/public/）。
+
+services:
+  - type: web
+    name: fever-inventory
+    runtime: node
+    plan: free
+    branch: main
+    buildCommand: node scripts/build-feishu.js
+    startCommand: node server/index.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # 构建时写进前端 js/feishu-config.js
+      - key: FEVER_APP_ID
+        sync: false
+      # 后端运行时配置：把 server/config.json 的整段内容原样粘进来（含 appSecret）
+      - key: FEVER_CONFIG_JSON
+        sync: false

@@ -332,7 +332,8 @@
       await E2E.waitUntil('只剩领用记录', function () {
         var rows = dataRows();
         return rows.length >= 1 && rows.every(function (r) {
-          return r.children[1].textContent.trim() === '领用';
+          // 第 0 列是批量勾选框（第二十一轮加的），动作列因此后移了一格
+          return r.children[2].textContent.trim() === '领用';
         });
       });
       E2E.setInput(document.querySelector('[name="t-type"]'), '');
@@ -398,11 +399,75 @@
       E2E.ok(rows[0].textContent.indexOf('修好回库') !== -1, '最新一条应排在最前，实际第一行：' + rows[0].textContent.replace(/\s+/g, ' '));
     });
 
+await E2E.record('出入库流水可以批量删除（谁都能删，和单条一个口径）', async function () {
+      var Ops = global.FEVER.Ops;
+      await E2E.goto('txns');
+      await E2E.waitUntil('流水页就绪', function () { return document.querySelector('[data-txn-pick]'); });
+
+      var before = await DB.getAll('transactions');
+      E2E.ok(before.length >= 2, '要有多条流水可试，实际 ' + before.length);
+
+      // 一条都没勾时，批量删除按钮必须是禁用的
+      var delBtn = document.querySelector('#txn-del-selected');
+      E2E.ok(delBtn && delBtn.disabled === true, '没勾选时「批量删除」应禁用');
+      E2E.ok(document.querySelector('#view-root').textContent.indexOf('删除流水不会改物品的库存数量') !== -1,
+        '页面上要写明"删流水不改库存"，这是最容易被误解的地方');
+
+      // 全选 → 按钮可用并带条数
+      E2E.clickSelector('[data-txn-check="all"]');
+      await E2E.waitUntil('全选后按钮可用', function () {
+        var b = document.querySelector('#txn-del-selected');
+        return b && !b.disabled && b.textContent.indexOf('批量删除（') !== -1;
+      });
+      var pickedText = text('#txn-picked');
+      E2E.ok(pickedText.indexOf('已选 ' + before.length + ' 条') !== -1,
+        '应显示已选条数，实际：' + pickedText);
+
+      // 确认框要把"要删的是哪几条"列出来，并写明不改数量
+      E2E.clickSelector('#txn-del-selected');
+      var mask = await modal();
+      await E2E.waitUntil('确认框就绪', function () { return mask.querySelector('[data-act="yes"]'); });
+      var txt = mask.textContent.replace(/\s+/g, ' ');
+      E2E.ok(txt.indexOf('批量删除 ' + before.length + ' 条') !== -1,
+        '标题要写清删几条，实际：' + txt.slice(0, 80));
+      E2E.ok(txt.indexOf('要删除的是') !== -1, '必须列出要删的是哪几条');
+      E2E.ok(txt.indexOf('不会改动物品的库存数量') !== -1,
+        '确认框要写明删流水不改库存，实际：' + txt.slice(0, 200));
+
+      // 先取消：一条都不该少
+      E2E.clickSelector('[data-act="no"]', mask);
+      await E2E.waitUntil('弹窗关闭', function () { return !document.querySelector('.modal-mask'); });
+      E2E.ok((await DB.getAll('transactions')).length === before.length, '点了取消就一条都不该删');
+
+      // 再来一次，这次确认
+      E2E.clickSelector('#txn-del-selected');
+      mask = await modal();
+      await E2E.waitUntil('确认框就绪', function () { return mask.querySelector('[data-act="yes"]'); });
+      E2E.clickSelector('[data-act="yes"]', mask);
+      await E2E.waitUntil('批量删除完成', function () {
+        return text('#toast-root').indexOf('已删除') !== -1;
+      }, 8000);
+      await E2E.waitUntilAsync('库里真的少了这些', async function () {
+        var left = await DB.getAll('transactions');
+        return left.length === 0;
+      });
+      E2E.ok((await DB.getAll('transactions')).length === 0, '选中的都该删掉');
+      E2E.ok(document.querySelector('#txn-del-selected').disabled === true,
+        '删完后勾选清空，按钮应回到禁用');
+      E2E.ok(text('#view-root').indexOf('没有符合条件的记录') !== -1, '空列表要给出说明');
+
+      // 逐条留痕
+      var log = await global.FEVER.Rules.getDeleteLog();
+      var mine = log.filter(function (e) { return e.store === 'transactions'; });
+      E2E.ok(mine.length === before.length,
+        '每一条都要记入删除记录：期望 ' + before.length + '，实际 ' + mine.length);
+    });
     E2E.finish();
   }
 
   run().catch(function (err) {
     E2E.record('测试主流程未抛异常', function () { E2E.fail(String(err && err.stack ? err.stack : err)); });
+
     E2E.finish();
   });
 })(window);

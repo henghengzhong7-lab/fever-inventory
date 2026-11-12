@@ -1,10 +1,9 @@
 /**
  * 视觉大类专属逻辑
  *
- * 这个类关心三件事：
+ * 这个类关心两件事：
  *   1) 每台相机 / 每个镜头都是独立的一件（单独建身份，一件一码）
  *   2) 镜头配哪台相机（配套关系）
- *   3) 标定有没有过期（超期要重新标定）
  * 视觉设备贵重，借用超期会重点提醒。
  */
 (function (global) {
@@ -19,34 +18,22 @@
     return item.identityMode === 'single';
   }
 
-  function calibrationState(item, category, today) {
-    var rem = global.FEVER.Rules.remindersFor(item, category, today || new Date());
-    return rem.filter(function (r) { return r.kind === 'calibration'; });
-  }
-
-  /** 卡片指标：待标定件数与在借贵重设备数 */
+  /** 卡片指标：在借贵重设备数（第二十四轮起视觉类不做标定，标定指标已删） */
   function cardMetrics(summary) {
     var items = summary.items || [];
-    var needCal = summary.reminders.filter(function (r) { return r.kind === 'calibration'; }).length;
     var lentPrecious = items.filter(function (i) { return isPrecious(i) && Number(i.lentQty) > 0; }).length;
     return [
-      { label: '待标定 / 需重标', value: needCal, alert: needCal > 0 },
       { label: '在借贵重设备', value: lentPrecious, alert: lentPrecious > 0 }
     ];
   }
 
-  /** 本类筛选：按镜头接口、标定状态、配套相机 */
+  /** 本类筛选：按镜头接口、配套相机（标定筛选第二十四轮已删） */
   function filterControls() {
     return '' +
       '<div class="field"><label>镜头接口</label>' +
         '<select class="select" name="f-lensMount" data-filter="vision">' +
           '<option value="">全部</option><option value="CS">CS</option><option value="C">C</option>' +
           '<option value="M12">M12</option><option value="其它">其它</option>' +
-        '</select></div>' +
-      '<div class="field"><label>标定状态</label>' +
-        '<select class="select" name="f-calibrationStatus" data-filter="vision">' +
-          '<option value="">全部</option><option value="未标定">未标定</option>' +
-          '<option value="已标定">已标定</option><option value="需重新标定">需重新标定</option>' +
         '</select></div>' +
       '<div class="field"><label>配套相机</label>' +
         '<input class="input" name="f-cameraPair" placeholder="如：VS-0002" data-filter="vision"></div>';
@@ -56,7 +43,6 @@
     var s = state || {};
     var e = extra(item);
     if (s['f-lensMount'] && String(e.lensMount || '') !== s['f-lensMount']) return false;
-    if (s['f-calibrationStatus'] && String(e.calibrationStatus || '') !== s['f-calibrationStatus']) return false;
     if (s['f-cameraPair'] && String(e.cameraPair || '').indexOf(s['f-cameraPair']) === -1) return false;
     return true;
   }
@@ -71,15 +57,7 @@
           var m = extra(i).lensMount;
           return m ? '<span class="badge-pill pill-info">' + UI().esc(m) + '</span>' : '-';
         } },
-      { label: '配套相机', render: function (i) { return UI().esc(extra(i).cameraPair || '-'); } },
-      { label: '标定', render: function (i) {
-          var e = extra(i);
-          var status = e.calibrationStatus || '未标定';
-          var stale = e.calibrationStatus === '需重新标定';
-          var cls = stale ? 'pill-warn' : (status === '已标定' ? 'pill-in_stock' : 'pill-info');
-          return '<span class="badge-pill ' + cls + '">' + UI().esc(status) + '</span>' +
-            (e.lastCalibrationDate ? '<div class="hint">' + UI().esc(e.lastCalibrationDate) + '</div>' : '');
-        } }
+      { label: '配套相机', render: function (i) { return UI().esc(extra(i).cameraPair || '-'); } }
     ];
   }
 
@@ -88,8 +66,7 @@
     var e = extra(item);
     var rows = [
       ['分辨率', e.resolution], ['帧率', e.frameRate], ['焦距 / 视场角', e.focalLength],
-      ['镜头接口', e.lensMount], ['配套相机', e.cameraPair],
-      ['标定状态', e.calibrationStatus], ['最近标定日期', e.lastCalibrationDate]
+      ['镜头接口', e.lensMount], ['配套相机', e.cameraPair]
     ];
     var html = '<h4 style="margin:16px 0 8px">视觉属性</h4><table class="grid"><tbody>' +
       rows.map(function (r) {
@@ -97,10 +74,6 @@
       }).join('') + '</tbody></table>';
 
     html += '<div class="alert-bar" style="margin-top:12px">';
-    var cal = calibrationState(item, category, new Date());
-    cal.forEach(function (r) {
-      html += '<div class="alert-item warn"><span class="who">标定</span><span>' + ui.esc(r.text) + '</span></div>';
-    });
     if (isPrecious(item)) {
       html += '<div class="alert-item info"><span class="who">贵重设备</span><span>单独追踪的一件一码设备，借出请登记借用人，归还请及时确认。</span></div>';
       if (Number(item.lentQty) > 0) {
@@ -116,30 +89,6 @@
     var single = items.filter(isPrecious).length;
     return '共 ' + summary.itemKinds + ' 件设备（' + single + ' 件单独追踪），在库 ' + summary.inStockQty +
       (summary.lentQty ? '，在外借出 ' + summary.lentQty + ' 件' : '');
-  }
-
-  /** 标定看板：每件设备最近标定日期、距今天数、是否超周期、要不要重新标定 */
-  function calibrationBoard(items, category, today) {
-    var cycle = num(((category || {}).reminders || {}).calibrationDays);
-    var now = today || new Date();
-    return (items || []).map(function (i) {
-      var e = extra(i);
-      var last = e.lastCalibrationDate || '';
-      var age = last ? global.FEVER.Rules.daysBetween(last, now) : null;
-      var overdue = cycle > 0 && (last ? (age !== null && age > cycle) : true);
-      var status = e.calibrationStatus || '未标定';
-      return {
-        code: i.code, name: i.name, spec: i.spec,
-        last: last, age: age, cycle: cycle,
-        status: (overdue && status !== '需重新标定') ? '需重新标定' : status,
-        overdue: overdue || status === '需重新标定',
-        precious: isPrecious(i),
-        lentQty: num(i.lentQty)
-      };
-    }).sort(function (a, b) {
-      if (a.overdue !== b.overdue) return a.overdue ? -1 : 1;
-      return num(b.age) - num(a.age);
-    });
   }
 
   /** 镜头与相机配套关系：按「配套相机」字段把设备两两对上 */
@@ -165,35 +114,12 @@
     return pairs;
   }
 
-  /** 本类专属工作区：标定看板 + 配套关系 + 贵重设备去向 */
+  /** 本类专属工作区：配套关系 + 贵重设备去向（标定看板第二十四轮已删） */
   function workspace(summary, category, today) {
     var UI = global.FEVER.UI;
     var items = summary.items || [];
     var cat = category || summary.category;
-    var board = calibrationBoard(items, cat, today);
-    var overdueCount = board.filter(function (r) { return r.overdue; }).length;
-
-    var html = '<div class="panel"><div class="panel-head">' +
-      '<h3 class="panel-title">标定看板</h3>' +
-      '<span class="page-sub" id="mod-vis-cal-note">' +
-        '标定周期 ' + num((cat.reminders || {}).calibrationDays) + ' 天' +
-        (overdueCount ? '　·　' + overdueCount + ' 件需重新标定' : '　·　都在周期内') +
-      '</span></div>' +
-      '<div class="panel-body tight" id="mod-vis-cal">' +
-      (board.length ? UI.table([
-        { label: '编码', render: function (r) {
-            return '<span class="code-cell" data-goto-item="' + UI.esc(r.code) + '">' + UI.esc(r.code) + '</span>'; } },
-        { label: '名称', render: function (r) {
-            return UI.esc(r.name) + (r.spec ? '<div class="hint">' + UI.esc(r.spec) + '</div>' : ''); } },
-        { label: '最近标定', render: function (r) { return UI.esc(r.last || '从未'); } },
-        { label: '距今天数', num: true, render: function (r) {
-            return UI.esc(r.age === null ? '-' : r.age); } },
-        { label: '标定状态', render: function (r) {
-            var cls = r.overdue ? 'pill-warn' : (r.status === '已标定' ? 'pill-in_stock' : 'pill-info');
-            return '<span class="badge-pill ' + cls + '">' + UI.esc(r.status) + '</span>'; } }
-      ], board, { rowClass: function (r) { return r.overdue ? 'row-low-stock' : ''; } })
-        : '<div class="empty">本类还没有设备</div>') +
-      '</div></div>';
+    var html = '';
 
     var pairs = pairing(items);
     html += '<div class="panel"><div class="panel-head">' +
@@ -241,8 +167,6 @@
   var mod = {
     id: 'vision',
     isPrecious: isPrecious,
-    calibrationState: calibrationState,
-    calibrationBoard: calibrationBoard,
     pairing: pairing,
     cardMetrics: cardMetrics,
     filterControls: filterControls,

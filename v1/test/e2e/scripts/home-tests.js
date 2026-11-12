@@ -75,11 +75,14 @@
       return cardMetrics('机械')['在库件数'] === '15';
     });
 
-    await E2E.record('首页显示且只显示四个大类卡片', function () {
+    await E2E.record('首页显示全部六个大类卡片，顺序按 sortOrder', function () {
       var cards = Array.prototype.slice.call(document.querySelectorAll('.cat-card'));
-      E2E.ok(cards.length === 4, '大类卡片数量应为 4，实际 ' + cards.length);
+      // 第十四周加了「宣传」「通用」：它们没有专属模块，但必须有卡片，
+      // 否则归到这两类的物品在界面上就找不到入口了
+      E2E.ok(cards.length === 6, '大类卡片数量应为 6，实际 ' + cards.length);
       var names = cards.map(function (c) { return c.querySelector('.cat-name').textContent.trim(); });
-      E2E.ok(names.join(',') === '机械,电控,视觉,硬件', '四个大类应为 机械,电控,视觉,硬件，实际 ' + names.join(','));
+      E2E.ok(names.join(',') === '机械,电控,视觉,硬件,宣传,通用',
+        '大类应为 机械,电控,视觉,硬件,宣传,通用，实际 ' + names.join(','));
     });
 
     await E2E.record('首页卡片上的数字与真实数据一致', function () {
@@ -91,15 +94,22 @@
 
       var vMetrics = cardMetrics('视觉');
       E2E.ok(vMetrics['在库件数'] === '1', '视觉在库件数应为 1，实际 ' + vMetrics['在库件数']);
-      E2E.ok(vMetrics['待标定 / 需重标'] === '1', '视觉应有 1 件待标定，实际 ' + vMetrics['待标定 / 需重标']);
+      // 第二十四轮：视觉类不做标定，卡片上不该再有这个指标
+      E2E.ok(vMetrics['待标定 / 需重标'] === undefined, '视觉不该再有「待标定 / 需重标」指标，实际 ' + vMetrics['待标定 / 需重标']);
 
       var hMetrics = cardMetrics('硬件');
       E2E.ok(hMetrics['在借工具'] === '0', '硬件当前没有在借工具，实际 ' + hMetrics['在借工具']);
       E2E.ok(hMetrics['耗材需补货'] === '0', '硬件没有设安全库存，不需要补货，实际 ' + hMetrics['耗材需补货']);
     });
 
-    await E2E.record('四个大类的功能文字各不相同（不是同一张表换名字）', function () {
-      var cards = Array.prototype.slice.call(document.querySelectorAll('.cat-card'));
+    await E2E.record('四个专属大类页的功能文字各不相同（不是同一张表换名字）', function () {
+      // 只看有专属模块的四个大类 —— 宣传 / 通用是刻意没有专属指标的，
+      // 它们用默认的「在库 / 种类 / 借出 / 待修」，两者长得一样是预期内的
+      var wanted = ['机械', '电控', '视觉', '硬件'];
+      var cards = Array.prototype.slice.call(document.querySelectorAll('.cat-card')).filter(function (c) {
+        return wanted.indexOf(c.querySelector('.cat-name').textContent.trim()) !== -1;
+      });
+      E2E.ok(cards.length === 4, '应能找到四个专属大类卡片，实际 ' + cards.length);
       var labels = cards.map(function (c) {
         return Array.prototype.slice.call(c.querySelectorAll('.metric-label')).map(function (m) {
           return m.textContent.trim();
@@ -113,16 +123,28 @@
 
     await E2E.record('顶栏导航包含全部入口', function () {
       var nav = text('#main-nav');
-      ['物资总览', '出入库登记', '借用台账', '采购申请', '发票台账', '出入库流水', '设置与备份'].forEach(function (label) {
+      ['物资总览', '扫码 / 登记', '打印标签', '借用台账', '采购申请', '发票台账', '出入库流水', '设置与备份', '下载发票'].forEach(function (label) {
         E2E.ok(nav.indexOf(label) !== -1, '导航里应包含「' + label + '」');
       });
+      // 第十七轮：「扫码查物」与「出入库登记」合并成一条，导航里不该再有后者
+      E2E.ok(nav.indexOf('出入库登记') === -1,
+        '「出入库登记」已并进「扫码 / 登记」，不该再单独出现在导航里，实际：' + nav);
+      // 第十六轮：搜索挪到物资总览后面；新增与总览平齐的「打印标签」入口
+      var order = Array.prototype.map.call(
+        document.querySelectorAll('#main-nav .nav-item'),
+        function (n) { return n.textContent.replace(/[0-9]+$/, '').trim(); }
+      );
+      E2E.ok(order[0] === '物资总览', '第一个应是物资总览，实际「' + order[0] + '」');
+      E2E.ok(order[1] === '搜索', '搜索应紧跟在物资总览后面，实际「' + order[1] + '」');
+      E2E.ok(order.indexOf('打印标签') !== -1, '导航里应有「打印标签」，实际：' + order.join('、'));
+      E2E.ok(order.indexOf('待提交') !== -1, '导航里应有「待提交」，实际：' + order.join('、'));
     });
 
     await E2E.record('首页显示需要注意的事项', function () {
       var body = text('#view-root');
       E2E.ok(body.indexOf('需要注意') !== -1, '首页应有「需要注意」区块');
       E2E.ok(body.indexOf('库存偏低') !== -1, '应提示 M4螺丝库存偏低');
-      E2E.ok(body.indexOf('尚未标定') !== -1, '应提示工业相机尚未标定');
+      E2E.ok(body.indexOf('尚未标定') === -1, '视觉类不做标定，首页不该再提示「尚未标定」（第二十四轮）');
     });
 
     await E2E.record('首页最近动态列出流水', function () {
@@ -145,7 +167,7 @@
     await E2E.record('面包屑能回到首页', async function () {
       E2E.clickSelector('#crumb [data-goto="home"]');
       await E2E.waitUntil('回到首页', function () { return global.location.hash.indexOf('home') !== -1; });
-      await E2E.waitUntil('首页出现四张卡片', function () { return document.querySelectorAll('.cat-card').length === 4; });
+      await E2E.waitUntil('首页出现六张卡片', function () { return document.querySelectorAll('.cat-card').length === 6; });
     });
 
     await E2E.record('导航按钮能切到采购、发票、流水、借用、设置页', async function () {

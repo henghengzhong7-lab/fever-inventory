@@ -66,7 +66,7 @@
       return DB.openDB().then(function () {
         return Rules.initCategories();
       }).then(function (cats) {
-        check('四个大类就绪', cats.length === 4, cats.length);
+        check('六个大类就绪', cats.length === 6, cats.length);
         return waitSettled();
       });
     }).then(function () {

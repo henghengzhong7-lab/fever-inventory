@@ -27,6 +27,7 @@ module.exports = {
     'js/stats.js',
     'js/ui.js',
     'js/qr.js',
+    'js/label-image.js',
     'js/scanner.js',
     'js/views.js',
     'js/zip.js',

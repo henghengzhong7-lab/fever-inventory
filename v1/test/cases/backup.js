@@ -41,7 +41,10 @@ module.exports.register = function (H, DB, Rules) {
     assertEqual(payload.data.items.length, 1);
     assertEqual(payload.data.invoices.length, 1);
     assertEqual(payload.data.transactions.length, 1);
-    assertEqual(payload.counts.categories, 4);
+    // 大类数量跟着 CATEGORY_DEFS 走：这里显式写死不写死都行，
+    // 但必须与库里实际条数一致，否则"备份少带了大类"这种问题会被漏掉
+    assertEqual(payload.counts.categories, (await DB.getAll('categories')).length, '备份条数应与库里一致');
+    assertEqual(payload.counts.categories, 6, '当前应是六个大类（含 宣传 / 通用）');
   });
 
   test('导入后各表条数与内容与导出前一致', async () => {

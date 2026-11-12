@@ -4,7 +4,7 @@
  * 重点验"每个横块都有自己的场景功能"，不是同一张表换个名字：
  *   机械 = 标准件库存 + 装配位置索引
  *   电控 = 安全等级警示 + 易损件更换周期 + 电池健康
- *   视觉 = 标定看板 + 镜头相机配套 + 贵重设备去向
+ *   视觉 = 镜头相机配套 + 贵重设备去向（标定看板第二十四轮已删）
  *   硬件 = 工具校准检定 + 耗材余量 + 低库存报警
  */
 (function (global) {
@@ -118,7 +118,7 @@
     await E2E.record('四个大类页面渲染出的内容两两不同', async function () {
       var markers = {
         mechanical: '标准件库存', electronic: '安全等级警示',
-        vision: '标定看板', hardware: '工具校准检定'
+        vision: '镜头与相机配套', hardware: '工具校准检定'
       };
       var snapshots = {};
       for (var id of Object.keys(markers)) {
@@ -129,7 +129,8 @@
       E2E.ok(new Set(list).size === 4, '四个大类页面内容应两两不同');
       // 每类的专属工作区标题，别的类不该出现
       E2E.ok(snapshots.mechanical.indexOf('装配位置索引') !== -1, '机械应有装配位置索引');
-      E2E.ok(snapshots.mechanical.indexOf('标定看板') === -1, '机械不该出现视觉的标定看板');
+      E2E.ok(snapshots.mechanical.indexOf('镜头与相机配套') === -1, '机械不该出现视觉的配套面板');
+      E2E.ok(snapshots.vision.indexOf('标定看板') === -1, '视觉自己也不该再有标定看板（第二十四轮）');
       E2E.ok(snapshots.vision.indexOf('标准件库存') === -1, '视觉不该出现机械的标准件库存');
       E2E.ok(snapshots.hardware.indexOf('电池健康') === -1, '硬件不该出现电控的电池健康');
     });
@@ -209,16 +210,19 @@
 
     /* ---------------- 视觉 ---------------- */
 
-    await E2E.record('视觉页：标定看板标出需重新标定并排最前', async function () {
-      await gotoCategory('vision', '标定看板');
-      var rows = rowsOf('#mod-vis-cal');
-      E2E.ok(rows.length === 2, '应有 2 台设备，实际 ' + rows.length);
-      var first = rows[0].textContent.replace(/\s+/g, ' ');
-      E2E.ok(first.indexOf('工业相机') !== -1, '超期 120 天的相机应排最前，实际：' + first);
-      E2E.ok(first.indexOf('需重新标定') !== -1, '超期应显示需重新标定');
-      var lens = rows.filter(function (r) { return r.textContent.indexOf('定焦镜头') !== -1; })[0];
-      E2E.ok(lens && lens.textContent.indexOf('已标定') !== -1, '刚标过 10 天的镜头应显示已标定');
-      E2E.ok(text('#mod-vis-cal-note').indexOf('1 件需重新标定') !== -1, '应汇总需重标件数');
+    await E2E.record('视觉页：标定整套已删（含老数据里的标定值也不再显示）', async function () {
+      // 需求方明确说「视觉的物品不需要标定，直接删除」
+      // 注意本页造的数据里**故意还留着** calibrationStatus/lastCalibrationDate（模拟老数据），
+      // 所以这条同时验证了「老数据不显示」
+      await gotoCategory('vision', '镜头与相机配套');
+      var b = body();
+      E2E.ok(b.indexOf('标定看板') === -1, '不该再有标定看板');
+      E2E.ok(b.indexOf('需重新标定') === -1, '不该再出现标定状态');
+      E2E.ok(b.indexOf('已标定') === -1, '老数据里的标定值也不该再显示');
+      E2E.ok(!document.querySelector('#mod-vis-cal'), '标定看板的容器不该存在');
+      E2E.ok(!document.querySelector('[name="f-calibrationStatus"]'), '不该再有标定状态筛选');
+      E2E.ok(!document.querySelector('#cat-table') ||
+        document.querySelector('#cat-table').textContent.indexOf('标定') === -1, '列表里不该再有标定列');
     });
 
     await E2E.record('视觉页：镜头与相机配套关系能对上', async function () {
@@ -278,13 +282,13 @@
     /* ---------------- 通用：专属字段与跳转 ---------------- */
 
     await E2E.record('新增物品弹窗只出现本类专属字段', async function () {
-      await gotoCategory('vision', '标定看板');
+      await gotoCategory('vision', '镜头与相机配套');
       E2E.clickSelector('[data-act="new-item"]');
       var mask = await E2E.waitUntil('弹窗打开', function () { return document.querySelector('.modal-mask'); })
         .then(function () { return document.querySelector('.modal-mask'); });
       await E2E.waitUntil('视觉专属字段出现', function () { return mask.querySelector('[name="x-resolution"]'); });
       E2E.ok(mask.querySelector('[name="x-lensMount"]'), '视觉应有镜头接口');
-      E2E.ok(mask.querySelector('[name="x-calibrationStatus"]'), '视觉应有标定状态');
+      E2E.ok(!mask.querySelector('[name="x-calibrationStatus"]'), '视觉不再有标定状态字段（第二十四轮）');
       E2E.ok(!mask.querySelector('[name="x-voltage"]'), '视觉不该出现电控的工作电压');
       E2E.ok(!mask.querySelector('[name="x-isTool"]'), '视觉不该出现硬件的是否工具');
 
@@ -310,7 +314,8 @@
       await E2E.waitUntil('视觉详情就绪', function () {
         return text('.page-title').indexOf('工业相机') !== -1 && body().indexOf('视觉属性') !== -1;
       });
-      E2E.ok(body().indexOf('标定') !== -1, '视觉详情应显示标定信息');
+      // 第二十四轮：标定整套已删 —— 注意本页造的数据里**故意留着**标定值（模拟老数据）
+      E2E.ok(body().indexOf('标定') === -1, '视觉详情不该再显示标定信息（老数据里的值也不显示）');
       E2E.ok(body().indexOf('贵重设备') !== -1, '视觉详情应说明是贵重设备');
       E2E.ok(body().indexOf('当前在借') !== -1, '在借时应提示当前在借');
     });
